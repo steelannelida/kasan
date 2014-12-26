@@ -233,7 +233,7 @@ static inline int check_valid_pointer(struct kmem_cache *s,
 	if (!object)
 		return 1;
 
-	base = page_address(page);
+	base = page_address(page) + s->redzone;
 	if (object < base || object >= base + page->objects * s->size ||
 		(object - base) % s->size) {
 		return 0;
@@ -450,7 +450,7 @@ static inline bool cmpxchg_double_slab(struct kmem_cache *s, struct page *page,
 static void get_map(struct kmem_cache *s, struct page *page, unsigned long *map)
 {
 	void *p;
-	void *addr = page_address(page);
+	void *addr = page_address(page) + s->redzone;
 
 	for (p = page->freelist; p; p = get_freepointer(s, p))
 		set_bit(slab_index(p, s, addr), map);
@@ -867,7 +867,8 @@ static int check_slab(struct kmem_cache *s, struct page *page)
 		return 0;
 	}
 
-	maxobj = order_objects(compound_order(page), s->size, s->reserved);
+	maxobj = order_objects(compound_order(page), s->size, s->reserved +
+			s->redzone);
 	if (page->objects > maxobj) {
 		slab_err(s, page, "objects %u > max %u",
 			s->name, page->objects, maxobj);
@@ -941,7 +942,8 @@ static int on_freelist(struct kmem_cache *s, struct page *page, void *search)
 			nr++;
 	}
 
-	max_objects = order_objects(compound_order(page), s->size, s->reserved);
+	max_objects = order_objects(compound_order(page), s->size, s->reserved +
+			s->redzone);
 	if (max_objects > MAX_OBJS_PER_PAGE)
 		max_objects = MAX_OBJS_PER_PAGE;
 
@@ -1163,7 +1165,8 @@ static unsigned long shrink_quarantine(struct shrinker *shrinker,
 
 			check_slab(s, page);
 			on_freelist(s, page, NULL);
-			for_each_object(p, s, page_address(page), page->objects)
+			for_each_object(p, s, page_address(page) + s->redzone,
+					page->objects)
 				check_object(s, page, p, SLUB_RED_INACTIVE);
 			list_move(&page->lru, &n->quarantine.slabs);
 			continue;
@@ -1672,7 +1675,7 @@ static struct page *new_slab(struct kmem_cache *s, gfp_t flags, int node)
 		SetPageSlabPfmemalloc(page);
 
 	kasan_poison_slab(page);
-	start = page_address(page);
+	start = page_address(page) + s->redzone;
 
 	if (unlikely(s->flags & SLAB_POISON))
 		memset(start, POISON_INUSE, PAGE_SIZE << order);
@@ -1702,7 +1705,7 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 		void *p;
 
 		slab_pad_check(s, page);
-		for_each_object(p, s, page_address(page),
+		for_each_object(p, s, page_address(page) + s->redzone,
 						page->objects)
 			check_object(s, page, p, SLUB_RED_INACTIVE);
 	}
@@ -3287,8 +3290,8 @@ static int calculate_sizes(struct kmem_cache *s, int forced_order)
 	 * end of the object and the free pointer. If not then add an
 	 * additional word to have some bytes to store Redzone information.
 	 */
-	if ((flags & SLAB_RED_ZONE) && size == s->object_size)
-		size += sizeof(void *);
+	if ((flags & SLAB_RED_ZONE))
+		size += s->redzone;
 #endif
 
 	/*
@@ -3318,29 +3321,19 @@ static int calculate_sizes(struct kmem_cache *s, int forced_order)
 		 * the object.
 		 */
 		size += 2 * sizeof(struct track);
-
-	if (flags & SLAB_RED_ZONE)
-		/*
-		 * Add some empty padding so that we can catch
-		 * overwrites from earlier objects rather than let
-		 * tracking information or the free pointer be
-		 * corrupted if a user writes before the start
-		 * of the object.
-		 */
-		size += sizeof(void *);
 #endif
 
 	/*
 	 * SLUB stores one object immediately after another beginning from
-	 * offset 0. In order to align the objects we have to simply size
-	 * each object to conform to the alignment.
+	 * offset s->redzone. In order to align the objects we have to simply
+	 * size each object to conform to the alignment.
 	 */
 	size = ALIGN(size, s->align);
 	s->size = size;
 	if (forced_order >= 0)
 		order = forced_order;
 	else
-		order = calculate_order(size, s->reserved);
+		order = calculate_order(size, s->reserved + s->redzone);
 
 	if (order < 0)
 		return 0;
@@ -3358,21 +3351,41 @@ static int calculate_sizes(struct kmem_cache *s, int forced_order)
 	/*
 	 * Determine the number of objects per slab
 	 */
-	s->oo = oo_make(order, size, s->reserved);
-	s->min = oo_make(get_order(size), size, s->reserved);
+	s->oo = oo_make(order, size, s->reserved + s->redzone);
+	s->min = oo_make(get_order(size), size, s->reserved + s->redzone);
 	if (oo_objects(s->oo) > oo_objects(s->max))
 		s->max = s->oo;
 
 	return !!oo_objects(s->oo);
 }
 
+static int calc_redzone(kmem_cache *s)
+{
+	int rz_log =
+		s->object_size <= 64        - 16   ? 0 :
+		s->object_size <= 128       - 32   ? 1 :
+		s->object_size <= 512       - 64   ? 2 :
+		s->object_size <= 4096      - 128  ? 3 :
+		s->object_size <= (1 << 14) - 256  ? 4 :
+		s->object_size <= (1 << 15) - 512  ? 5 :
+		s->object_size <= (1 << 16) - 1024 ? 6 : 7;
+	return ALIGN(16 << rz_log, s->align);
+}
+
 static int kmem_cache_open(struct kmem_cache *s, unsigned long flags)
 {
 	s->flags = kmem_cache_flags(s->size, flags, s->name, s->ctor);
 	s->reserved = 0;
+	s->redzone = 0;
 
 	if (need_reserve_slab_rcu && (s->flags & SLAB_DESTROY_BY_RCU))
 		s->reserved = sizeof(struct rcu_head);
+
+	if (s->flags & SLAB_RED_ZONE) {
+		s->redzone = calc_redzone(s);
+		pr_warn("Added redzone %d to cache %s\n", s->redzone,
+				s->name ? s->name : "NONAME");
+	}
 
 	if (!calculate_sizes(s, -1))
 		goto error;
@@ -3384,6 +3397,7 @@ static int kmem_cache_open(struct kmem_cache *s, unsigned long flags)
 		if (get_order(s->size) > get_order(s->object_size)) {
 			s->flags &= ~DEBUG_METADATA_FLAGS;
 			s->offset = 0;
+			s->redzone = 0;
 			if (!calculate_sizes(s, -1))
 				goto error;
 		}
@@ -3461,7 +3475,7 @@ static void list_slab_objects(struct kmem_cache *s, struct page *page,
 							const char *text)
 {
 #ifdef CONFIG_SLUB_DEBUG
-	void *addr = page_address(page);
+	void *addr = page_address(page) + s->redzone;
 	void *p;
 	unsigned long *map = kzalloc(BITS_TO_LONGS(page->objects) *
 				     sizeof(long), GFP_ATOMIC);
@@ -4118,7 +4132,7 @@ static int validate_slab(struct kmem_cache *s, struct page *page,
 						unsigned long *map)
 {
 	void *p;
-	void *addr = page_address(page);
+	void *addr = page_address(page) + s->redzone;
 
 	if (!check_slab(s, page) ||
 			!on_freelist(s, page, NULL))
@@ -4329,7 +4343,7 @@ static void process_slab(struct loc_track *t, struct kmem_cache *s,
 		struct page *page, enum track_item alloc,
 		unsigned long *map)
 {
-	void *addr = page_address(page);
+	void *addr = page_address(page) + s->redzone;
 	void *p;
 
 	bitmap_zero(map, page->objects);
