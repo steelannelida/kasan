@@ -286,6 +286,9 @@ static inline int slab_index(void *p, struct kmem_cache *s, void *addr)
 
 static inline size_t slab_ksize(const struct kmem_cache *s)
 {
+#ifdef CONFIG_KASAN
+	return s->object_size;
+#else
 #ifdef CONFIG_SLUB_DEBUG
 	/*
 	 * Debugging requires use of the padding between object
@@ -306,6 +309,7 @@ static inline size_t slab_ksize(const struct kmem_cache *s)
 	 * Else we can use all the padding etc for the allocation
 	 */
 	return s->size;
+#endif
 }
 
 static inline int order_objects(int order, unsigned long size, int reserved)
@@ -646,7 +650,7 @@ static void print_trailer(struct kmem_cache *s, struct page *page, u8 *p)
 	dump_stack();
 }
 
-void object_err(struct kmem_cache *s, struct page *page,
+static void object_err(struct kmem_cache *s, struct page *page,
 			u8 *object, char *reason)
 {
 	slab_bug(s, "%s", reason);
@@ -1645,8 +1649,8 @@ static void setup_object(struct kmem_cache *s, struct page *page,
 	if (unlikely(s->ctor)) {
 		kasan_unpoison_object_data(s, object);
 		s->ctor(object);
-		kasan_poison_object_data(s, object);
 	}
+	kasan_poison_object_data(s, object);
 }
 
 static struct page *new_slab(struct kmem_cache *s, gfp_t flags, int node)
@@ -3329,6 +3333,8 @@ static int calculate_sizes(struct kmem_cache *s, int forced_order)
 		 */
 		size += sizeof(void *);
 #endif
+
+	kasan_cache_create(s, &size);
 
 	/*
 	 * SLUB stores one object immediately after another beginning from
@@ -5500,7 +5506,6 @@ static int sysfs_slab_add(struct kmem_cache *s)
 		 */
 		name = create_unique_id(s);
 	}
-
 	s->kobj.kset = cache_kset(s);
 	err = kobject_init_and_add(&s->kobj, &slab_ktype, NULL, "%s", name);
 	if (err)

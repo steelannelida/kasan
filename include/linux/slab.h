@@ -89,6 +89,10 @@
 
 #define SLAB_QUARANTINE		0x04000000UL
 
+#ifdef CONFIG_KASAN
+#define SLAB_KASAN		0x08000000UL
+#endif
+
 /* The following flags affect the page allocator grouping pages by mobility */
 #define SLAB_RECLAIM_ACCOUNT	0x00020000UL		/* Objects are reclaimable */
 #define SLAB_TEMPORARY		SLAB_RECLAIM_ACCOUNT	/* Objects are short-lived */

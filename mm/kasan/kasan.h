@@ -42,6 +42,38 @@ struct kasan_global {
 #endif
 };
 
+enum kasan_state {
+	KSN_INIT,
+	KSN_ALLOC,
+	KSN_QUARANTINE,
+	KSN_FREE
+};
+
+/* TODO: compact these structures */
+struct kasan_track {
+	int cpu;
+	int pid;
+	unsigned long when;
+};
+
+struct kasan_alloc {
+	enum kasan_state state;
+	size_t alloc_size;
+	struct kasan_track track;
+};
+
+struct kasan_free {
+	struct kasan_track track;
+};
+
+#define get_alloc_info(cache, object) \
+	((struct kasan_alloc *) \
+	 ((void *)(object) + (cache)->kasan_info.alloc_offset))
+
+#define get_free_info(cache, object) \
+	((struct kasan_free *) \
+	 ((void *)(object) + (cache)->kasan_info.free_offset))
+
 void kasan_report_error(struct access_info *info);
 void kasan_report_user_access(struct access_info *info);
 

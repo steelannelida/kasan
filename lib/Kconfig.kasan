@@ -6,7 +6,6 @@ if HAVE_ARCH_KASAN
 config KASAN
 	bool "AddressSanitizer: runtime memory debugger"
 	depends on !MEMORY_HOTPLUG
-	depends on SLUB_DEBUG
 	select CONSTRUCTORS
 	help
 	  Enables address sanitizer - runtime memory debugger,

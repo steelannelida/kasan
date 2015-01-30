@@ -97,6 +97,41 @@ static inline bool init_task_stack_addr(unsigned long addr)
 			sizeof(init_thread_union.stack));
 }
 
+static void print_track(struct kasan_track *track)
+{
+	pr_err("PID = %d, CPU = %d, timestamp = %lu\n", track->pid, track->cpu,
+	       track->when);
+}
+
+static void print_object(struct kmem_cache *cache, void *object)
+{
+	struct kasan_alloc *alloc_info = get_alloc_info(cache, object);
+	struct kasan_free *free_info;
+
+	pr_err("Object at %p, in cache %s\n", object, cache->name);
+	switch (alloc_info->state) {
+	case KSN_INIT:
+		pr_err("Object not allocated yet\n");
+		break;
+	case KSN_ALLOC:
+		pr_err("Object allocated with size %zu bytes.\n",
+		       alloc_info->alloc_size);
+		pr_err("Allocation:\n");
+		print_track(&alloc_info->track);
+		break;
+	case KSN_FREE:
+	case KSN_QUARANTINE:
+		pr_err("Object freed, allocated with size %zu bytes\n",
+		       alloc_info->alloc_size);
+		free_info = get_free_info(cache, object);
+		pr_err("Allocation:\n");
+		print_track(&alloc_info->track);
+		pr_err("Deallocation:\n");
+		print_track(&alloc_info->track);
+		break;
+	}
+}
+
 static void print_address_description(struct access_info *info)
 {
 	struct page *page;
@@ -112,12 +147,12 @@ static void print_address_description(struct access_info *info)
 			object = virt_to_obj(cache, page_address(page),
 					(void *)info->access_addr);
 			last_object = page_address(page) +
-					page->objects * cache->size;
+					page->objects * (cache->size - 1);
 
 			if (unlikely(object > last_object))
 				object = last_object; /* we hit into padding */
-
-			object_err(cache, page, object, "kasan: bad access detected");
+			if (cache->flags & SLAB_KASAN)
+				print_object(cache, object);
 			return;
 		}
 		dump_page(page, "kasan: bad access detected");
@@ -184,6 +219,7 @@ void kasan_report_error(struct access_info *info)
 {
 	unsigned long flags;
 
+	kasan_disable_local();
 	spin_lock_irqsave(&report_lock, flags);
 	pr_err("================================="
 		"=================================\n");
@@ -193,6 +229,7 @@ void kasan_report_error(struct access_info *info)
 	pr_err("================================="
 		"=================================\n");
 	spin_unlock_irqrestore(&report_lock, flags);
+	kasan_enable_local();
 }
 
 void kasan_report_user_access(struct access_info *info)

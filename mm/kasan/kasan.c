@@ -40,6 +40,11 @@ static void kasan_poison_shadow(const void *address, size_t size, u8 value)
 	unsigned long shadow_start, shadow_end;
 	unsigned long addr = (unsigned long)address;
 
+	WARN(size < 0, "Poison shadow of negative size %zu\n", size);
+	WARN(addr < PAGE_OFFSET,
+		"Poison shadow outside scope: %p -- %p", address,
+		address + size);
+
 	shadow_start = kasan_mem_to_shadow(addr);
 	shadow_end = kasan_mem_to_shadow(addr + size);
 
@@ -314,6 +319,43 @@ void kasan_free_pages(struct page *page, unsigned int order)
 				KASAN_FREE_PAGE);
 }
 
+static size_t optimal_redzone(size_t object_size)
+{
+	int rz =
+		object_size <= 64        - 16   ? 16 :
+		object_size <= 128       - 32   ? 32 :
+		object_size <= 512       - 64   ? 64 :
+		object_size <= 4096      - 128  ? 128 :
+		object_size <= (1 << 14) - 256  ? 256 :
+		object_size <= (1 << 15) - 512  ? 512 :
+		object_size <= (1 << 16) - 1024 ? 1024 : 2048;
+	return rz;
+}
+
+void kasan_cache_create(struct kmem_cache *cache, cache_size_t *size)
+{
+	int redzone_adjust;
+
+	BUG_ON(cache->flags & SLAB_POISON);
+	cache->flags |= SLAB_KASAN;
+
+	cache->kasan_info.alloc_offset = *size;
+	*size += sizeof(struct kasan_alloc);
+
+	if (cache->flags & SLAB_DESTROY_BY_RCU || cache->ctor ||
+	    cache->object_size < sizeof(struct kasan_free) + sizeof(void *)) {
+		cache->kasan_info.free_offset = *size;
+		*size += sizeof(struct kasan_free);
+	} else
+		cache->kasan_info.free_offset = sizeof(void *);
+
+	redzone_adjust = optimal_redzone(cache->object_size) -
+		(*size - cache->object_size);
+	if (redzone_adjust > 0) {
+		*size += redzone_adjust;
+	}
+}
+
 void kasan_poison_slab(struct page *page)
 {
 	kasan_poison_shadow(page_address(page),
@@ -332,11 +374,23 @@ void kasan_poison_object_data(struct kmem_cache *cache, void *object)
 	kasan_poison_shadow(object,
 			round_up(cache->object_size, KASAN_SHADOW_SCALE_SIZE),
 			KASAN_KMALLOC_REDZONE);
+	if (cache->flags & SLAB_KASAN) {
+		struct kasan_alloc *alloc_info = get_alloc_info(cache, object);
+
+		alloc_info->state = KSN_INIT;
+	}
 }
 
 void kasan_slab_alloc(struct kmem_cache *cache, void *object)
 {
 	kasan_kmalloc(cache, object, cache->object_size);
+}
+
+static inline void set_track(struct kasan_track *track)
+{
+	track->cpu = smp_processor_id();
+	track->pid = current->pid;
+	track->when = jiffies;
 }
 
 void kasan_slab_free(struct kmem_cache *cache, void *object)
@@ -349,6 +403,15 @@ void kasan_slab_free(struct kmem_cache *cache, void *object)
 		return;
 
 	kasan_poison_shadow(object, rounded_up_size, KASAN_KMALLOC_FREE);
+
+	if (cache->flags & SLAB_KASAN) {
+		struct kasan_alloc *alloc_info = get_alloc_info(cache, object);
+		struct kasan_free *free_info = get_free_info(cache, object);
+
+		WARN_ON(alloc_info->state != KSN_ALLOC);
+		alloc_info->state = KSN_FREE;
+		set_track(&free_info->track);
+	}
 }
 
 void kasan_kmalloc(struct kmem_cache *cache, const void *object, size_t size)
@@ -364,9 +427,18 @@ void kasan_kmalloc(struct kmem_cache *cache, const void *object, size_t size)
 	redzone_end = round_up((unsigned long)object + cache->object_size,
 			KASAN_SHADOW_SCALE_SIZE);
 
+
 	kasan_unpoison_shadow(object, size);
 	kasan_poison_shadow((void *)redzone_start, redzone_end - redzone_start,
-		KASAN_KMALLOC_REDZONE);
+			KASAN_KMALLOC_REDZONE);
+
+	if (cache->flags & SLAB_KASAN) {
+		struct kasan_alloc *alloc_info = get_alloc_info(cache, object);
+
+		alloc_info->state = KSN_ALLOC;
+		alloc_info->alloc_size = size;
+		set_track(&alloc_info->track);
+	}
 }
 EXPORT_SYMBOL(kasan_kmalloc);
 

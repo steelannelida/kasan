@@ -7,6 +7,7 @@
  * (C) 2007 SGI, Christoph Lameter
  */
 #include <linux/kobject.h>
+#include <linux/kasan.h>
 
 enum stat_item {
 	ALLOC_FASTPATH,		/* Allocation from cpu slab */
@@ -101,6 +102,9 @@ struct kmem_cache {
 	 */
 	int remote_node_defrag_ratio;
 #endif
+#ifdef CONFIG_KASAN
+	struct kasan_cache kasan_info;
+#endif
 	struct kmem_cache_node *node[MAX_NUMNODES];
 };
 
@@ -117,8 +121,5 @@ static inline void *virt_to_obj(struct kmem_cache *s, void *slab_page, void *x)
 {
 	return x - ((x - slab_page) % s->size);
 }
-
-void object_err(struct kmem_cache *s, struct page *page,
-		u8 *object, char *reason);
 
 #endif /* _LINUX_SLUB_DEF_H */
