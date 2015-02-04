@@ -91,6 +91,8 @@
 
 #ifdef CONFIG_KASAN
 #define SLAB_KASAN		0x08000000UL
+#else
+#define SLAB_KASAN		0x00000000UL
 #endif
 
 /* The following flags affect the page allocator grouping pages by mobility */

@@ -381,16 +381,37 @@ void kasan_poison_object_data(struct kmem_cache *cache, void *object)
 	}
 }
 
-void kasan_slab_alloc(struct kmem_cache *cache, void *object)
+void kasan_slab_alloc(struct kmem_cache *cache, void *object, gfp_t flags)
 {
-	kasan_kmalloc(cache, object, cache->object_size);
+	kasan_kmalloc(cache, object, cache->object_size, flags);
 }
 
-static inline void set_track(struct kasan_track *track)
+#define KASAN_STACK_DEPTH 128
+
+static inline struct kasan_stack *save_stack(gfp_t flags)
+{
+	unsigned long entries[KASAN_STACK_DEPTH];
+	struct stack_trace trace = {
+		.nr_entries = 0,
+		.entries = entries,
+		.max_entries = KASAN_STACK_DEPTH,
+		.skip = 3
+	};
+
+	save_stack_trace(&trace);
+	if (trace.nr_entries != 0 &&
+	    trace.entries[trace.nr_entries-1] == ULONG_MAX)
+		trace.nr_entries--;
+
+	return kasan_save_stack(entries, trace.nr_entries, flags);
+}
+
+static inline void set_track(struct kasan_track *track, gfp_t flags)
 {
 	track->cpu = smp_processor_id();
 	track->pid = current->pid;
 	track->when = jiffies;
+	track->stack = save_stack(flags);
 }
 
 void kasan_slab_free(struct kmem_cache *cache, void *object)
@@ -410,11 +431,12 @@ void kasan_slab_free(struct kmem_cache *cache, void *object)
 
 		WARN_ON(alloc_info->state != KSN_ALLOC);
 		alloc_info->state = KSN_FREE;
-		set_track(&free_info->track);
+		set_track(&free_info->track, GFP_NOWAIT);
 	}
 }
 
-void kasan_kmalloc(struct kmem_cache *cache, const void *object, size_t size)
+void kasan_kmalloc(struct kmem_cache *cache, const void *object, size_t size,
+		   gfp_t flags)
 {
 	unsigned long redzone_start;
 	unsigned long redzone_end;
@@ -437,12 +459,12 @@ void kasan_kmalloc(struct kmem_cache *cache, const void *object, size_t size)
 
 		alloc_info->state = KSN_ALLOC;
 		alloc_info->alloc_size = size;
-		set_track(&alloc_info->track);
+		set_track(&alloc_info->track, flags);
 	}
 }
 EXPORT_SYMBOL(kasan_kmalloc);
 
-void kasan_kmalloc_large(const void *ptr, size_t size)
+void kasan_kmalloc_large(const void *ptr, size_t size, gfp_t flags)
 {
 	struct page *page;
 	unsigned long redzone_start;
@@ -461,7 +483,7 @@ void kasan_kmalloc_large(const void *ptr, size_t size)
 		KASAN_PAGE_REDZONE);
 }
 
-void kasan_krealloc(const void *object, size_t size)
+void kasan_krealloc(const void *object, size_t size, gfp_t flags)
 {
 	struct page *page;
 
@@ -471,9 +493,9 @@ void kasan_krealloc(const void *object, size_t size)
 	page = virt_to_head_page(object);
 
 	if (unlikely(!PageSlab(page)))
-		kasan_kmalloc_large(object, size);
+		kasan_kmalloc_large(object, size, flags);
 	else
-		kasan_kmalloc(page->slab_cache, object, size);
+		kasan_kmalloc(page->slab_cache, object, size, flags);
 }
 
 void kasan_kfree_large(const void *ptr)

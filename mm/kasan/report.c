@@ -101,6 +101,18 @@ static void print_track(struct kasan_track *track)
 {
 	pr_err("PID = %d, CPU = %d, timestamp = %lu\n", track->pid, track->cpu,
 	       track->when);
+	if (track->stack) {
+		struct stack_trace trace = {
+			.nr_entries = track->stack->size,
+			.max_entries = track->stack->size,
+			.entries = track->stack->entries,
+			.skip = 0
+		};
+
+		print_stack_trace(&trace, 1);
+	} else {
+		pr_err("(stack is not available)\n");
+	}
 }
 
 static void print_object(struct kmem_cache *cache, void *object)
@@ -127,7 +139,7 @@ static void print_object(struct kmem_cache *cache, void *object)
 		pr_err("Allocation:\n");
 		print_track(&alloc_info->track);
 		pr_err("Deallocation:\n");
-		print_track(&alloc_info->track);
+		print_track(&free_info->track);
 		break;
 	}
 }

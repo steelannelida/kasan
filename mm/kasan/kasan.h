@@ -3,6 +3,8 @@
 
 #include <linux/kasan.h>
 #include <linux/compiler.h>
+#include <linux/list.h>
+#include <linux/gfp.h>
 
 /*
  * Prevent randconfig/allconfig build
@@ -42,6 +44,10 @@ struct kasan_global {
 #endif
 };
 
+/********************************************
+ * Structures to keep alloc and free tracks *
+ ********************************************/
+
 enum kasan_state {
 	KSN_INIT,
 	KSN_ALLOC,
@@ -50,10 +56,14 @@ enum kasan_state {
 };
 
 /* TODO: compact these structures */
+
+struct kasan_stack;
+
 struct kasan_track {
 	int cpu;
 	int pid;
 	unsigned long when;
+	struct kasan_stack *stack;
 };
 
 struct kasan_alloc {
@@ -103,5 +113,18 @@ static __always_inline void kasan_report(unsigned long addr,
 	kasan_report_error(&info);
 }
 
+/***********************
+ * API for stack depot *
+ ***********************/
+
+struct kasan_stack {
+	struct kasan_stack *next;  /* Link in the hashtable */
+	u32 hash : 32;             /* Hash in the hastable */
+	int size : 32;             /* Number of frames in the stack */
+	unsigned long entries[1];  /* Variable-sized array of entries. */
+};
+
+struct kasan_stack *kasan_save_stack(unsigned long *entries, int size,
+				     gfp_t flags);
 
 #endif
