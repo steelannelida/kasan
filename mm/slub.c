@@ -3335,7 +3335,7 @@ static int calculate_sizes(struct kmem_cache *s, int forced_order)
 		size += sizeof(void *);
 #endif
 
-	kasan_cache_create(s, &size);
+	kasan_cache_create(s, &size, &s->flags);
 
 	/*
 	 * SLUB stores one object immediately after another beginning from

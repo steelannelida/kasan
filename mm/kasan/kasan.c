@@ -332,12 +332,19 @@ static size_t optimal_redzone(size_t object_size)
 	return rz;
 }
 
-void kasan_cache_create(struct kmem_cache *cache, cache_size_t *size)
+void kasan_cache_create(struct kmem_cache *cache, cache_size_t *size,
+			unsigned long *flags)
 {
 	int redzone_adjust;
 
-	BUG_ON(cache->flags & SLAB_POISON);
-	cache->flags |= SLAB_KASAN;
+	if (*flags & (SLAB_POISON)) {
+		pr_warn("SLAB_POISON is set up for cache %s, disabling KASan\n",
+			cache->name);
+		return;
+	}
+	if (cache->object_size >= 4 << 20)
+		return;
+	*flags |= SLAB_KASAN;
 
 	cache->kasan_info.alloc_offset = *size;
 	*size += sizeof(struct kasan_alloc);
@@ -433,6 +440,20 @@ void kasan_slab_free(struct kmem_cache *cache, void *object)
 		alloc_info->state = KSN_FREE;
 		set_track(&free_info->track, GFP_NOWAIT);
 	}
+}
+
+size_t kasan_ksize(const void *p)
+{
+	struct kmem_cache *cache;
+	struct kasan_alloc *alloc_info;
+	struct page *page;
+
+	page = virt_to_head_page(p);
+	cache = page->slab_cache;
+	if (!(cache->flags & SLAB_KASAN))
+		return cache->object_size;
+	alloc_info = get_alloc_info(cache, p);
+	return alloc_info->alloc_size;
 }
 
 void kasan_kmalloc(struct kmem_cache *cache, const void *object, size_t size,

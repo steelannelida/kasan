@@ -11,12 +11,18 @@
  */
 
 
-#include "kasan.h"
 #include <linux/gfp.h>
-#include <linux/percpu.h>
-#include <linux/mm.h>
 #include <linux/hash.h>
-#include <linux/atomic.h>
+#include <linux/kernel.h>
+#include <linux/mm.h>
+#include <linux/percpu.h>
+#include <linux/printk.h>
+#include <linux/stacktrace.h>
+#include <linux/string.h>
+#include <linux/types.h>
+
+#include "kasan.h"
+
 
 #define STACK_ALLOC_ORDER 4
 #define STACK_ALLOC_SIZE (1L << (PAGE_SHIFT + STACK_ALLOC_ORDER))

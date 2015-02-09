@@ -82,6 +82,7 @@ static void print_error_description(struct access_info *info)
 	pr_err("%s of size %zu by task %s/%d\n",
 		info->is_write ? "Write" : "Read",
 		info->access_size, current->comm, task_pid_nr(current));
+	dump_stack();
 }
 
 static inline bool kernel_or_module_addr(unsigned long addr)
@@ -109,7 +110,7 @@ static void print_track(struct kasan_track *track)
 			.skip = 0
 		};
 
-		print_stack_trace(&trace, 1);
+		print_stack_trace(&trace, 0);
 	} else {
 		pr_err("(stack is not available)\n");
 	}
@@ -121,6 +122,8 @@ static void print_object(struct kmem_cache *cache, void *object)
 	struct kasan_free *free_info;
 
 	pr_err("Object at %p, in cache %s\n", object, cache->name);
+	if (!(cache->flags & SLAB_KASAN))
+		return;
 	switch (alloc_info->state) {
 	case KSN_INIT:
 		pr_err("Object not allocated yet\n");
@@ -144,6 +147,22 @@ static void print_object(struct kmem_cache *cache, void *object)
 	}
 }
 
+static inline void *nearest_obj(struct kmem_cache *cache, struct page *page,
+				void *x) {
+#ifdef CONFIG_SLUB
+	void *object = x - (x - page_address(page)) % cache->size;
+	void *last_object = page_address(page) +
+		(page->objects - 1) * cache->size;
+#elif CONFIG_SLAB
+	void *object = x - (x - page->s_mem) % cache->size;
+	void *last_object = page->s_mem + (cache->num - 1) * cache->size;
+#endif
+	if (unlikely(object > last_object))
+		return last_object;
+	else
+		return object;
+}
+
 static void print_address_description(struct access_info *info)
 {
 	struct page *page;
@@ -154,21 +173,13 @@ static void print_address_description(struct access_info *info)
 		if (PageSlab(page)) {
 			void *object;
 			struct kmem_cache *cache = page->slab_cache;
-			void *last_object;
 
-			object = virt_to_obj(cache, page_address(page),
+			object = nearest_obj(cache, page,
 					(void *)info->access_addr);
-			last_object = page_address(page) +
-					page->objects * (cache->size - 1);
-
-			if (unlikely(object > last_object))
-				object = last_object; /* we hit into padding */
-			if (cache->flags & SLAB_KASAN)
-				print_object(cache, object);
+			print_object(cache, object);
 			return;
 		}
 		dump_page(page, "kasan: bad access detected");
-		dump_stack();
 		return;
 	}
 
@@ -177,7 +188,6 @@ static void print_address_description(struct access_info *info)
 			pr_err("Address belongs to variable %pS\n",
 				(void *)addr);
 	}
-	dump_stack();
 }
 
 static bool row_is_guilty(unsigned long row, unsigned long guilty)
