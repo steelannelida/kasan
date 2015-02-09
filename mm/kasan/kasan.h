@@ -44,7 +44,7 @@ struct kasan_global {
 #endif
 };
 
-/********************************************
+/**************************
  * Structures to keep alloc and free tracks *
  ********************************************/
 
@@ -113,14 +113,14 @@ static __always_inline void kasan_report(unsigned long addr,
 	kasan_report_error(&info);
 }
 
-/***********************
+/*
  * API for stack depot *
- ***********************/
+ */
 
 struct kasan_stack {
 	struct kasan_stack *next;  /* Link in the hashtable */
-	u32 hash : 32;             /* Hash in the hastable */
-	int size : 32;             /* Number of frames in the stack */
+	u32 hash;             /* Hash in the hastable */
+	u32 size;             /* Number of frames in the stack */
 	unsigned long entries[1];  /* Variable-sized array of entries. */
 };
 
