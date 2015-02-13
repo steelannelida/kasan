@@ -1551,7 +1551,6 @@ static inline void slab_free_hook(struct kmem_cache *s, void *x)
 	if (!(s->flags & SLAB_DEBUG_OBJECTS))
 		debug_check_no_obj_freed(x, s->object_size);
 
-	kasan_slab_free(s, x);
 }
 
 /*
@@ -2940,6 +2939,7 @@ slab_empty:
 	discard_slab(s, page);
 }
 
+
 /*
  * Fastpath with forced inlining to produce a kfree and kmem_cache_free that
  * can perform fastpath freeing without additional function calls.
@@ -2954,6 +2954,15 @@ slab_empty:
 static __always_inline void slab_free(struct kmem_cache *s,
 			struct page *page, void *x, unsigned long addr)
 {
+#ifdef CONFIG_KASAN
+	if (!kasan_slab_free(s, x))
+		nokasan_free(s, x, addr);
+}
+
+void nokasan_free(struct kmem_cache *s, void *x, unsigned long addr)
+{
+	struct page *page = virt_to_head_page(x);
+#endif
 	void **object = (void *)x;
 	struct kmem_cache_cpu *c;
 	unsigned long tid;

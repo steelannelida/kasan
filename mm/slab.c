@@ -3360,13 +3360,20 @@ free_done:
 static inline void __cache_free(struct kmem_cache *cachep, void *objp,
 				unsigned long caller)
 {
+#ifdef CONFIG_KASAN
+	if (!kasan_slab_free(cachep, objp))
+		nokasan_free(cachep, objp, caller);
+}
+void nokasan_free(struct kmem_cache *cachep, void *objp,
+		  unsigned long caller)
+{
+#endif
 	struct array_cache *ac = cpu_cache_get(cachep);
 
 	check_irq_off();
 	kmemleak_free_recursive(objp, cachep->flags);
 	objp = cache_free_debugcheck(cachep, objp, caller);
 
-	kasan_slab_free(cachep, objp);
 	kmemcheck_slab_free(cachep, objp, cachep->object_size);
 
 	/*

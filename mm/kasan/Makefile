@@ -6,4 +6,4 @@ CFLAGS_kasan.o := $(call cc-option, -fno-conserve-stack)
 
 CFLAGS_kasan.o := $(call cc-option, -fno-stack-protector)
 
-obj-y := kasan.o report.o stackdepot.o
+obj-y := kasan.o report.o stackdepot.o quarantine.o

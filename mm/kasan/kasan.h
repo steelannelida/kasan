@@ -34,7 +34,8 @@ struct kasan_source_location {
 struct kasan_global {
 	const void *beg;		/* Address of the beginning of the global variable. */
 	size_t size;			/* Initial size of the global variable. */
-	size_t size_with_redzone; 	/* Size of the variable + size of the red zone. 32 bytes aligned */
+	size_t size_with_redzone;	/* Size of the variable + size of the
+					   red zone. 32 bytes aligned */
 	const void *name;
 	const void *module_name;	/* Name of the module where the global variable is declared. */
 	unsigned long has_dynamic_init;	/* this needed only for C++ */
@@ -73,16 +74,14 @@ struct kasan_alloc {
 };
 
 struct kasan_free {
+	/* This field is used while the object is in quarantine.
+	 * Otherwise it might be used by the freelist */
+	void **quarantine_link;  /* TODO: don't offset free_info by 8 bytes */
 	struct kasan_track track;
 };
 
-#define get_alloc_info(cache, object) \
-	((struct kasan_alloc *) \
-	 ((void *)(object) + (cache)->kasan_info.alloc_offset))
-
-#define get_free_info(cache, object) \
-	((struct kasan_free *) \
-	 ((void *)(object) + (cache)->kasan_info.free_offset))
+struct kasan_alloc *get_alloc_info(struct kmem_cache *cache, void *object);
+struct kasan_free *get_free_info(struct kmem_cache *cache, void *object);
 
 void kasan_report_error(struct access_info *info);
 void kasan_report_user_access(struct access_info *info);
@@ -118,13 +117,19 @@ static __always_inline void kasan_report(unsigned long addr,
  */
 
 struct kasan_stack {
-	struct kasan_stack *next;  /* Link in the hashtable */
-	u32 hash;             /* Hash in the hastable */
-	u32 size;             /* Number of frames in the stack */
-	unsigned long entries[1];  /* Variable-sized array of entries. */
+	struct kasan_stack *next;	/* Link in the hashtable */
+	u32 hash;			/* Hash in the hastable */
+	u32 size;			/* Number of frames in the stack */
+	unsigned long entries[1];	/* Variable-sized array of entries. */
 };
 
 struct kasan_stack *kasan_save_stack(unsigned long *entries, int size,
 				     gfp_t flags);
+
+
+void quarantine_put(struct kasan_free *info, struct kmem_cache *cache);
+void quarantine_flush(void);
+void quarantine_remove_cache(struct kmem_cache *cache);
+
 
 #endif
