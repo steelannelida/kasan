@@ -56,20 +56,19 @@ enum kasan_state {
 	KSN_FREE
 };
 
-/* TODO: compact these structures */
-
-struct kasan_stack;
+#define kasan_stack_handle u64
+#define KASAN_STACK_BITS (24)
 
 struct kasan_track {
-	int cpu;
-	int pid;
-	unsigned long when;
-	struct kasan_stack *stack;
+	u64 cpu : 6;			/* for NR_CPUS = 64 */
+	u64 when : 18;			/* ~256 seconds */
+	u64 pid : 16;			/* 65536 processes */
+	kasan_stack_handle stack : 24;  /* 256 MB of stacks */
 };
 
 struct kasan_alloc {
-	enum kasan_state state;
-	size_t alloc_size;
+	enum kasan_state state : 2;
+	size_t alloc_size : 62;
 	struct kasan_track track;
 };
 
@@ -116,16 +115,10 @@ static __always_inline void kasan_report(unsigned long addr,
  * API for stack depot *
  */
 
-struct kasan_stack {
-	struct kasan_stack *next;	/* Link in the hashtable */
-	u32 hash;			/* Hash in the hastable */
-	u32 size;			/* Number of frames in the stack */
-	unsigned long entries[1];	/* Variable-sized array of entries. */
-};
+struct stack_trace;
 
-struct kasan_stack *kasan_save_stack(unsigned long *entries, int size,
-				     gfp_t flags);
-
+kasan_stack_handle kasan_save_stack(struct stack_trace *trace, gfp_t flags);
+void kasan_fetch_stack(kasan_stack_handle handle, struct stack_trace *trace);
 
 void quarantine_put(struct kasan_free *info, struct kmem_cache *cache);
 void quarantine_flush(void);

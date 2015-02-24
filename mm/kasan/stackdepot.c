@@ -24,31 +24,39 @@
 #include "kasan.h"
 
 
-#define STACK_ALLOC_ORDER 4
+#define STACK_ALLOC_ORDER 4 /* 64K */
 #define STACK_ALLOC_SIZE (1L << (PAGE_SHIFT + STACK_ALLOC_ORDER))
 #define STACK_ALLOC_GFP_MASK (__GFP_WAIT | __GFP_IO | __GFP_FS | __GFP_NOWARN)
+#define STACK_ALLOC_ALIGN 4
+#define STACK_ALLOC_OFFSET_BITS (STACK_ALLOC_ORDER + PAGE_SHIFT - \
+				 STACK_ALLOC_ALIGN)
+#define STACK_ALLOC_SLAB_BITS (KASAN_STACK_BITS - STACK_ALLOC_OFFSET_BITS)
+#define STACK_ALLOC_MAX_SLABS (1L << STACK_ALLOC_SLAB_BITS)
 
-/* Storage for raw stacks */
-struct stack_slab {
-	void *base;
-	size_t offset;
+union handle_parts {
+	kasan_stack_handle handle;
+	struct {
+		u32 slabindex : STACK_ALLOC_SLAB_BITS;
+		u32 offset : STACK_ALLOC_OFFSET_BITS;
+	};
 };
 
-static DEFINE_PER_CPU(struct stack_slab, slabs);
+struct kasan_stack {
+	struct kasan_stack *next;	/* Link in the hashtable */
+	u32 hash;			/* Hash in the hastable */
+	u32 size;			/* Number of frames in the stack */
+	union handle_parts handle;
+	unsigned long entries[1];	/* Variable-sized array of entries. */
+};
 
-/* Allocation of a new area for raw stack storage */
-static inline void kasan_stack_expand(struct stack_slab *slab, gfp_t flags)
-{
-	struct page *page;
 
-	page = alloc_pages(flags & STACK_ALLOC_GFP_MASK, STACK_ALLOC_ORDER);
-	if (unlikely(!page))
-		slab->base = NULL;
-	else
-		slab->base = page_address(page);
+static void *stack_slabs[STACK_ALLOC_MAX_SLABS] = {
+	[0 ... STACK_ALLOC_MAX_SLABS - 1] = NULL
+};
 
-	slab->offset = 0;
-}
+static int index;
+static size_t offset;
+static DEFINE_SPINLOCK(depot_lock);
 
 /* Allocation of a new stack in raw storage */
 static struct kasan_stack *kasan_alloc_stack(unsigned long *entries, int size,
@@ -56,35 +64,43 @@ static struct kasan_stack *kasan_alloc_stack(unsigned long *entries, int size,
 {
 	int required_size = offsetof(struct kasan_stack, entries) +
 		sizeof(unsigned long) * size;
-	struct stack_slab *slab;
 	struct kasan_stack *stack;
-	unsigned long flags;
+
+	required_size = ALIGN(required_size, 1 << STACK_ALLOC_ALIGN);
 
 	if (unlikely(size <= 0))
 		return NULL;
 
-	local_irq_save(flags);
-	slab = &get_cpu_var(slabs);
-
-	if (unlikely(!slab->base) ||
-	    unlikely(slab->offset + required_size > STACK_ALLOC_SIZE))
-		kasan_stack_expand(slab, alloc_flags);
-
-	if (unlikely(!slab->base)) {
-		pr_warn("Failed to allocate stack in kasan depot");
-		stack = NULL;
-		goto out;
+	if (unlikely(offset + required_size > STACK_ALLOC_SIZE)) {
+		if (unlikely(index + 1 >= STACK_ALLOC_MAX_SLABS)) {
+			pr_err("Stack depot reached limit capacity");
+			return NULL;
+		}
+		index++;
+		offset = 0;
 	}
-	stack = slab->base + slab->offset;
-	slab->offset += required_size;
+
+
+	if (unlikely(!stack_slabs[index])) {
+		struct page *page = alloc_pages(
+				alloc_flags & STACK_ALLOC_GFP_MASK,
+				STACK_ALLOC_ORDER);
+
+		if (unlikely(!page)) {
+			pr_warn("Failed to allocate stack in kasan depot");
+			return NULL;
+		}
+		stack_slabs[index] = page_address(page);
+	}
+
+	stack = stack_slabs[index] + offset;
 
 	stack->hash = hash;
 	stack->size = size;
+	stack->handle.slabindex = index;
+	stack->handle.offset = offset >> STACK_ALLOC_ALIGN;
 	__memcpy(stack->entries, entries, size * sizeof(unsigned long));
-
-out:
-	put_cpu_var(slabs);
-	local_irq_restore(flags);
+	offset += required_size;
 
 	return stack;
 }
@@ -94,53 +110,84 @@ out:
 #define STACK_HASH_MASK (STACK_HASH_SIZE - 1)
 #define STACK_HASH_SEED 0x9747b28c
 
-struct kasan_stack *stack_table[STACK_HASH_SIZE] = {
+static struct kasan_stack *stack_table[STACK_HASH_SIZE] = {
 	[0 ...	STACK_HASH_SIZE - 1] = NULL
 };
 
 /* Calculate hash for a stack */
 static inline u32 hash_stack(unsigned long *entries, int size)
 {
-	/* TODO: copy hashing formula from ASAN. */
 	return arch_fast_hash2((u32 *)entries,
 			       size * sizeof(unsigned long) / sizeof(u32),
 			       STACK_HASH_SEED);
 }
 
+static inline struct kasan_stack *find_stack(struct kasan_stack **bin,
+					     unsigned long *entries, int size,
+					     u32 hash)
+{
+	struct kasan_stack *found;
+
+	bin = &stack_table[hash & STACK_HASH_MASK];
+	for (found = *bin; found; found = found->next) {
+		if (found->hash == hash &&
+		    found->size == size &&
+		    !memcmp(entries, found->entries,
+			    size * sizeof(unsigned long))) {
+			return found;
+		}
+	}
+	return NULL;
+}
+
+void kasan_fetch_stack(kasan_stack_handle handle, struct stack_trace *trace)
+{
+	union handle_parts parts = { .handle = handle };
+	void *slab = stack_slabs[parts.slabindex];
+	size_t offset = parts.offset << STACK_ALLOC_ALIGN;
+	struct kasan_stack *stack = slab + offset;
+
+	trace->nr_entries = trace->max_entries = stack->size;
+	trace->entries = stack->entries;
+	trace->skip = 0;
+}
+
 /*
  * kasan_save_stack - save stack in a stack depot.
- * @entries - array of stack entries.
- * @size - size of stack array.
+ * @trace - the stacktrace to save.
  * @alloc_flags - flags for allocating additional memory if required.
  *
- * Returns a pointer to the stack struct stored in depot.
+ * Returns the handle of the stack struct stored in depot.
  */
-struct kasan_stack *kasan_save_stack(unsigned long *entries, int size,
-					    gfp_t alloc_flags)
+kasan_stack_handle kasan_save_stack(struct stack_trace *trace,
+				    gfp_t alloc_flags)
 {
 	u32 hash;
 	struct kasan_stack *found, *new, **bin;
+	unsigned long flags;
 
-	if (unlikely(size <= 0))
-		return NULL;
+	if (unlikely(trace->nr_entries <= 0))
+		return 0;
 
-	hash = hash_stack(entries, size);
+	hash = hash_stack(trace->entries, trace->nr_entries);
 	bin = &stack_table[hash & STACK_HASH_MASK];
-	found = *bin;
-	while (found) {
-		if (found->hash == hash &&
-		    !memcmp(entries, found->entries,
-			    size * sizeof(unsigned long))) {
-			break;
-		}
-		found = found->next;
-	}
-	if (likely(found))
-		return found;
+	found = find_stack(bin, trace->entries, trace->nr_entries, hash);
+	if (found)
+		goto ret;
 
-	new = kasan_alloc_stack(entries, size, hash, alloc_flags);
-	do {
+	spin_lock_irqsave(&depot_lock, flags);
+	new = kasan_alloc_stack(trace->entries, trace->nr_entries, hash,
+				alloc_flags);
+	if (new) {
 		new->next = ACCESS_ONCE(*bin);
-	} while (cmpxchg(bin, new->next, new) != new->next);
-	return new;
+		*bin = new;
+	}
+	found = new;
+	spin_unlock_irqrestore(&depot_lock, flags);
+ret:
+	if (found)
+		return found->handle.handle;
+	else
+		return 0;
 }
+

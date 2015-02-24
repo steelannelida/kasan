@@ -356,7 +356,7 @@ void kasan_cache_create(struct kmem_cache *cache, cache_size_t *size,
 		cache->kasan_info.free_offset = *size;
 		*size += sizeof(struct kasan_free);
 	} else
-		cache->kasan_info.free_offset = sizeof(void *);
+		cache->kasan_info.free_offset = 0;
 
 	redzone_adjust = optimal_redzone(cache->object_size) -
 		(*size - cache->object_size);
@@ -407,7 +407,7 @@ void kasan_slab_alloc(struct kmem_cache *cache, void *object, gfp_t flags)
 
 #define KASAN_STACK_DEPTH 128
 
-static inline struct kasan_stack *save_stack(gfp_t flags)
+static inline kasan_stack_handle save_stack(gfp_t flags)
 {
 	unsigned long entries[KASAN_STACK_DEPTH];
 	struct stack_trace trace = {
@@ -422,7 +422,7 @@ static inline struct kasan_stack *save_stack(gfp_t flags)
 	    trace.entries[trace.nr_entries-1] == ULONG_MAX)
 		trace.nr_entries--;
 
-	return kasan_save_stack(entries, trace.nr_entries, flags);
+	return kasan_save_stack(&trace, flags);
 }
 
 static inline void set_track(struct kasan_track *track, gfp_t flags)
@@ -435,12 +435,12 @@ static inline void set_track(struct kasan_track *track, gfp_t flags)
 
 struct kasan_alloc *get_alloc_info(struct kmem_cache *cache, void *object)
 {
-	return object + cache->kasan_info.alloc_offset;
+	return (void *)object + cache->kasan_info.alloc_offset;
 }
 
 struct kasan_free *get_free_info(struct kmem_cache *cache, void *object)
 {
-	return object + cache->kasan_info.free_offset;
+	return (void *)object + cache->kasan_info.free_offset;
 }
 
 bool kasan_slab_free(struct kmem_cache *cache, void *object)
@@ -469,6 +469,9 @@ bool kasan_slab_free(struct kmem_cache *cache, void *object)
 		case KSN_FREE:
 			pr_err("Double free");
 			dump_stack();
+			break;
+		default:
+			break;
 		}
 	}
 

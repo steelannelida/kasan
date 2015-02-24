@@ -100,23 +100,19 @@ static inline bool init_task_stack_addr(unsigned long addr)
 
 static void print_track(struct kasan_track *track)
 {
-	pr_err("PID = %d, CPU = %d, timestamp = %lu\n", track->pid, track->cpu,
+	pr_err("PID = %d, CPU = %d, timestamp = %d\n", track->pid, track->cpu,
 	       track->when);
 	if (track->stack) {
-		struct stack_trace trace = {
-			.nr_entries = track->stack->size,
-			.max_entries = track->stack->size,
-			.entries = track->stack->entries,
-			.skip = 0
-		};
+		struct stack_trace trace;
 
+		kasan_fetch_stack(track->stack, &trace);
 		print_stack_trace(&trace, 0);
 	} else {
 		pr_err("(stack is not available)\n");
 	}
 }
 
-static void print_object(struct kmem_cache *cache, void *object)
+void print_object(struct kmem_cache *cache, void *object)
 {
 	struct kasan_alloc *alloc_info = get_alloc_info(cache, object);
 	struct kasan_free *free_info;
@@ -129,14 +125,14 @@ static void print_object(struct kmem_cache *cache, void *object)
 		pr_err("Object not allocated yet\n");
 		break;
 	case KSN_ALLOC:
-		pr_err("Object allocated with size %zu bytes.\n",
+		pr_err("Object allocated with size %lu bytes.\n",
 		       alloc_info->alloc_size);
 		pr_err("Allocation:\n");
 		print_track(&alloc_info->track);
 		break;
 	case KSN_FREE:
 	case KSN_QUARANTINE:
-		pr_err("Object freed, allocated with size %zu bytes\n",
+		pr_err("Object freed, allocated with size %lu bytes\n",
 		       alloc_info->alloc_size);
 		free_info = get_free_info(cache, object);
 		pr_err("Allocation:\n");
@@ -146,6 +142,7 @@ static void print_object(struct kmem_cache *cache, void *object)
 		break;
 	}
 }
+EXPORT_SYMBOL(print_object);
 
 static inline void *nearest_obj(struct kmem_cache *cache, struct page *page,
 				void *x) {
