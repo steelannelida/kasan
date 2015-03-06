@@ -13,6 +13,17 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/module.h>
+#include <linux/mm.h>
+
+#ifdef CONFIG_SLAB
+#include <linux/slab_def.h>
+#endif
+
+#ifdef CONFIG_SLUB
+#include <linux/slub_def.h>
+#endif
+
+
 
 static inline void run_test(void (*test_func) (void), const char *name)
 {
@@ -23,7 +34,7 @@ static inline void run_test(void (*test_func) (void), const char *name)
 
 static inline void fail(const char *message)
 {
-	pr_err("##### fail %s\n", message);
+	pr_err("##### FAIL %s\n", message);
 }
 
 static inline void assert_oob(void *ptr, const char *function)
@@ -180,7 +191,6 @@ static noinline void __init kmalloc_oob_in_memset(void)
 		fail("Allocation failed");
 		return;
 	}
-
 	memset(ptr, 0, size+5);
 	kfree(ptr);
 
@@ -217,9 +227,10 @@ static noinline void __init kmalloc_uaf_memset(void)
 	}
 
 	kfree(ptr);
-	memset(ptr, 0, size);
+	memset(ptr + 16, 0, size - 16); /* Don't overwrite metadata in the
+					   beginning of the object */
 
-	assert_uaf(ptr, "memset");
+	assert_uaf(ptr + 16, "memset");
 }
 
 static noinline void __init kmalloc_uaf2(void)
@@ -293,12 +304,38 @@ static noinline void __init kasan_stack_oob(void)
 	assert_oob(p, __func__);
 }
 
+static noinline void __init kasan_quarantine_cache(void)
+{
+	struct kmem_cache *cache = kmem_cache_create(
+			"test", 137, 8, GFP_KERNEL, NULL);
+	int i;
+
+	for (i = 0; i <  100; i++) {
+		void *p = kmem_cache_alloc(cache, GFP_KERNEL);
+
+		kmem_cache_free(cache, p);
+		p = kmalloc(sizeof(u64), GFP_KERNEL);
+		kfree(p);
+	}
+	kmem_cache_shrink(cache);
+	for (i = 0; i <  100; i++) {
+		u64 *p = kmem_cache_alloc(cache, GFP_KERNEL);
+
+		kmem_cache_free(cache, p);
+		p = kmalloc(sizeof(u64), GFP_KERNEL);
+		kfree(p);
+	}
+	kmem_cache_destroy(cache);
+}
+
 int __init kmalloc_tests_init(void)
 {
 	run_test(kmalloc_oob_right, "kmalloc_oob_right");
 	run_test(kmalloc_oob_left, "kmalloc_oob_left");
 	run_test(kmalloc_node_oob_right, "kmalloc_node_oob_right");
+#ifdef CONFIG_SLUB
 	run_test(kmalloc_large_oob_rigth, "kmalloc_large_oob_rigth");
+#endif
 	run_test(kmalloc_oob_krealloc_more, "kmalloc_oob_krealloc_more");
 	run_test(kmalloc_oob_krealloc_less, "kmalloc_oob_krealloc_less");
 	run_test(kmalloc_oob_16, "kmalloc_oob_16");
@@ -309,6 +346,7 @@ int __init kmalloc_tests_init(void)
 	run_test(kmem_cache_oob, "kmem_cache_oob");
 	run_test(kasan_global_oob, "kasan_global_oob");
 	run_test(kasan_stack_oob, "kasan_stack_oob");
+	run_test(kasan_quarantine_cache, "kasan_quarantine");
 	return -EAGAIN;
 }
 

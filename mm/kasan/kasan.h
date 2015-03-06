@@ -75,7 +75,7 @@ struct kasan_alloc {
 struct kasan_free {
 	/* This field is used while the object is in quarantine.
 	 * Otherwise it might be used by the freelist */
-	void **quarantine_link;  /* TODO: don't offset free_info by 8 bytes */
+	void **quarantine_link;
 	struct kasan_track track;
 };
 

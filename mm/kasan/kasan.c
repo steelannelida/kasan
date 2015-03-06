@@ -405,7 +405,7 @@ void kasan_slab_alloc(struct kmem_cache *cache, void *object, gfp_t flags)
 	kasan_kmalloc(cache, object, cache->object_size, flags);
 }
 
-#define KASAN_STACK_DEPTH 128
+#define KASAN_STACK_DEPTH 32
 
 static inline kasan_stack_handle save_stack(gfp_t flags)
 {
