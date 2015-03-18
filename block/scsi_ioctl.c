@@ -142,7 +142,7 @@ static void blk_set_cmd_filter_defaults(struct blk_cmd_filter *filter)
 	__set_bit(GPCMD_VERIFY_10, filter->read_ok);
 	__set_bit(VERIFY_16, filter->read_ok);
 	__set_bit(REPORT_LUNS, filter->read_ok);
-	__set_bit(SERVICE_ACTION_IN, filter->read_ok);
+	__set_bit(SERVICE_ACTION_IN_16, filter->read_ok);
 	__set_bit(RECEIVE_DIAGNOSTIC, filter->read_ok);
 	__set_bit(MAINTENANCE_IN, filter->read_ok);
 	__set_bit(GPCMD_READ_BUFFER_CAPACITY, filter->read_ok);
@@ -332,7 +332,7 @@ static int sg_io(struct request_queue *q, struct gendisk *bd_disk,
 
 	ret = 0;
 	if (hdr->iovec_count) {
-		size_t iov_data_len;
+		struct iov_iter i;
 		struct iovec *iov = NULL;
 
 		ret = rw_copy_check_uvector(-1, hdr->dxferp, hdr->iovec_count,
@@ -342,20 +342,11 @@ static int sg_io(struct request_queue *q, struct gendisk *bd_disk,
 			goto out_free_cdb;
 		}
 
-		iov_data_len = ret;
-		ret = 0;
-
 		/* SG_IO howto says that the shorter of the two wins */
-		if (hdr->dxfer_len < iov_data_len) {
-			hdr->iovec_count = iov_shorten(iov,
-						       hdr->iovec_count,
-						       hdr->dxfer_len);
-			iov_data_len = hdr->dxfer_len;
-		}
+		iov_iter_init(&i, rq_data_dir(rq), iov, hdr->iovec_count,
+			      min_t(unsigned, ret, hdr->dxfer_len));
 
-		ret = blk_rq_map_user_iov(q, rq, NULL, (struct sg_iovec *) iov,
-					  hdr->iovec_count,
-					  iov_data_len, GFP_KERNEL);
+		ret = blk_rq_map_user_iov(q, rq, NULL, &i, GFP_KERNEL);
 		kfree(iov);
 	} else if (hdr->dxfer_len)
 		ret = blk_rq_map_user(q, rq, NULL, hdr->dxferp, hdr->dxfer_len,
@@ -458,7 +449,7 @@ int sg_scsi_ioctl(struct request_queue *q, struct gendisk *disk, fmode_t mode,
 	rq = blk_get_request(q, in_len ? WRITE : READ, __GFP_WAIT);
 	if (IS_ERR(rq)) {
 		err = PTR_ERR(rq);
-		goto error;
+		goto error_free_buffer;
 	}
 	blk_rq_set_block_pc(rq);
 
@@ -508,7 +499,7 @@ int sg_scsi_ioctl(struct request_queue *q, struct gendisk *disk, fmode_t mode,
 
 	if (bytes && blk_rq_map_kern(q, rq, buffer, bytes, __GFP_WAIT)) {
 		err = DRIVER_ERROR << 24;
-		goto out;
+		goto error;
 	}
 
 	memset(sense, 0, sizeof(sense));
@@ -517,7 +508,6 @@ int sg_scsi_ioctl(struct request_queue *q, struct gendisk *disk, fmode_t mode,
 
 	blk_execute_rq(q, disk, rq, 0);
 
-out:
 	err = rq->errors & 0xff;	/* only 8 bit SCSI status */
 	if (err) {
 		if (rq->sense_len && rq->sense) {
@@ -532,9 +522,11 @@ out:
 	}
 	
 error:
+	blk_put_request(rq);
+
+error_free_buffer:
 	kfree(buffer);
-	if (rq)
-		blk_put_request(rq);
+
 	return err;
 }
 EXPORT_SYMBOL_GPL(sg_scsi_ioctl);

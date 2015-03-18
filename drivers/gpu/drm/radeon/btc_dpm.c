@@ -24,6 +24,7 @@
 
 #include "drmP.h"
 #include "radeon.h"
+#include "radeon_asic.h"
 #include "btcd.h"
 #include "r600_dpm.h"
 #include "cypress_dpm.h"
@@ -1170,6 +1171,23 @@ static const struct radeon_blacklist_clocks btc_blacklist_clocks[] =
         { 25000, 30000, RADEON_SCLK_UP }
 };
 
+void btc_get_max_clock_from_voltage_dependency_table(struct radeon_clock_voltage_dependency_table *table,
+						     u32 *max_clock)
+{
+	u32 i, clock = 0;
+
+	if ((table == NULL) || (table->count == 0)) {
+		*max_clock = clock;
+		return;
+	}
+
+	for (i = 0; i < table->count; i++) {
+		if (clock < table->entries[i].clk)
+			clock = table->entries[i].clk;
+	}
+	*max_clock = clock;
+}
+
 void btc_apply_voltage_dependency_rules(struct radeon_clock_voltage_dependency_table *table,
 					u32 clock, u16 max_voltage, u16 *voltage)
 {
@@ -2259,6 +2277,7 @@ static void btc_update_requested_ps(struct radeon_device *rdev,
 	eg_pi->requested_rps.ps_priv = &eg_pi->requested_ps;
 }
 
+#if 0
 void btc_dpm_reset_asic(struct radeon_device *rdev)
 {
 	rv770_restrict_performance_levels_before_switch(rdev);
@@ -2266,6 +2285,7 @@ void btc_dpm_reset_asic(struct radeon_device *rdev)
 	btc_set_boot_state_timing(rdev);
 	rv770_set_boot_state(rdev);
 }
+#endif
 
 int btc_dpm_pre_set_power_state(struct radeon_device *rdev)
 {
