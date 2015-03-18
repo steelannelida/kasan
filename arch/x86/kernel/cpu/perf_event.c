@@ -31,6 +31,8 @@
 #include <asm/nmi.h>
 #include <asm/smp.h>
 #include <asm/alternative.h>
+#include <asm/mmu_context.h>
+#include <asm/tlbflush.h>
 #include <asm/timer.h>
 #include <asm/desc.h>
 #include <asm/ldt.h>
@@ -42,6 +44,8 @@ struct x86_pmu x86_pmu __read_mostly;
 DEFINE_PER_CPU(struct cpu_hw_events, cpu_hw_events) = {
 	.enabled = 1,
 };
+
+struct static_key rdpmc_always_available = STATIC_KEY_INIT_FALSE;
 
 u64 __read_mostly hw_cache_event_ids
 				[PERF_COUNT_HW_CACHE_MAX]
@@ -243,8 +247,9 @@ static bool check_hw_exists(void)
 
 msr_fail:
 	printk(KERN_CONT "Broken PMU hardware detected, using software events only.\n");
-	printk(boot_cpu_has(X86_FEATURE_HYPERVISOR) ? KERN_INFO : KERN_ERR
-	       "Failed to access perfctr msr (MSR %x is %Lx)\n", reg, val_new);
+	printk("%sFailed to access perfctr msr (MSR %x is %Lx)\n",
+		boot_cpu_has(X86_FEATURE_HYPERVISOR) ? KERN_INFO : KERN_ERR,
+		reg, val_new);
 
 	return false;
 }
@@ -443,12 +448,6 @@ int x86_pmu_hw_config(struct perf_event *event)
 
 	if (event->attr.type == PERF_TYPE_RAW)
 		event->hw.config |= event->attr.config & X86_RAW_EVENT_MASK;
-
-	if (event->attr.sample_period && x86_pmu.limit_period) {
-		if (x86_pmu.limit_period(event, event->attr.sample_period) >
-				event->attr.sample_period)
-			return -EINVAL;
-	}
 
 	return x86_setup_perfctr(event);
 }
@@ -987,9 +986,6 @@ int x86_perf_event_set_period(struct perf_event *event)
 	if (left > x86_pmu.max_period)
 		left = x86_pmu.max_period;
 
-	if (x86_pmu.limit_period)
-		left = x86_pmu.limit_period(event, left);
-
 	per_cpu(pmc_prev_left[idx], smp_processor_id()) = left;
 
 	/*
@@ -1335,8 +1331,6 @@ x86_pmu_notifier(struct notifier_block *self, unsigned long action, void *hcpu)
 		break;
 
 	case CPU_STARTING:
-		if (x86_pmu.attr_rdpmc)
-			set_in_cr4(X86_CR4_PCE);
 		if (x86_pmu.cpu_starting)
 			x86_pmu.cpu_starting(cpu);
 		break;
@@ -1812,14 +1806,44 @@ static int x86_pmu_event_init(struct perf_event *event)
 			event->destroy(event);
 	}
 
+	if (ACCESS_ONCE(x86_pmu.attr_rdpmc))
+		event->hw.flags |= PERF_X86_EVENT_RDPMC_ALLOWED;
+
 	return err;
+}
+
+static void refresh_pce(void *ignored)
+{
+	if (current->mm)
+		load_mm_cr4(current->mm);
+}
+
+static void x86_pmu_event_mapped(struct perf_event *event)
+{
+	if (!(event->hw.flags & PERF_X86_EVENT_RDPMC_ALLOWED))
+		return;
+
+	if (atomic_inc_return(&current->mm->context.perf_rdpmc_allowed) == 1)
+		on_each_cpu_mask(mm_cpumask(current->mm), refresh_pce, NULL, 1);
+}
+
+static void x86_pmu_event_unmapped(struct perf_event *event)
+{
+	if (!current->mm)
+		return;
+
+	if (!(event->hw.flags & PERF_X86_EVENT_RDPMC_ALLOWED))
+		return;
+
+	if (atomic_dec_and_test(&current->mm->context.perf_rdpmc_allowed))
+		on_each_cpu_mask(mm_cpumask(current->mm), refresh_pce, NULL, 1);
 }
 
 static int x86_pmu_event_idx(struct perf_event *event)
 {
 	int idx = event->hw.idx;
 
-	if (!x86_pmu.attr_rdpmc)
+	if (!(event->hw.flags & PERF_X86_EVENT_RDPMC_ALLOWED))
 		return 0;
 
 	if (x86_pmu.num_counters_fixed && idx >= INTEL_PMC_IDX_FIXED) {
@@ -1837,16 +1861,6 @@ static ssize_t get_attr_rdpmc(struct device *cdev,
 	return snprintf(buf, 40, "%d\n", x86_pmu.attr_rdpmc);
 }
 
-static void change_rdpmc(void *info)
-{
-	bool enable = !!(unsigned long)info;
-
-	if (enable)
-		set_in_cr4(X86_CR4_PCE);
-	else
-		clear_in_cr4(X86_CR4_PCE);
-}
-
 static ssize_t set_attr_rdpmc(struct device *cdev,
 			      struct device_attribute *attr,
 			      const char *buf, size_t count)
@@ -1858,13 +1872,26 @@ static ssize_t set_attr_rdpmc(struct device *cdev,
 	if (ret)
 		return ret;
 
+	if (val > 2)
+		return -EINVAL;
+
 	if (x86_pmu.attr_rdpmc_broken)
 		return -ENOTSUPP;
 
-	if (!!val != !!x86_pmu.attr_rdpmc) {
-		x86_pmu.attr_rdpmc = !!val;
-		on_each_cpu(change_rdpmc, (void *)val, 1);
+	if ((val == 2) != (x86_pmu.attr_rdpmc == 2)) {
+		/*
+		 * Changing into or out of always available, aka
+		 * perf-event-bypassing mode.  This path is extremely slow,
+		 * but only root can trigger it, so it's okay.
+		 */
+		if (val == 2)
+			static_key_slow_inc(&rdpmc_always_available);
+		else
+			static_key_slow_dec(&rdpmc_always_available);
+		on_each_cpu(refresh_pce, NULL, 1);
 	}
+
+	x86_pmu.attr_rdpmc = val;
 
 	return count;
 }
@@ -1908,6 +1935,9 @@ static struct pmu pmu = {
 
 	.event_init		= x86_pmu_event_init,
 
+	.event_mapped		= x86_pmu_event_mapped,
+	.event_unmapped		= x86_pmu_event_unmapped,
+
 	.add			= x86_pmu_add,
 	.del			= x86_pmu_del,
 	.start			= x86_pmu_start,
@@ -1922,13 +1952,15 @@ static struct pmu pmu = {
 	.flush_branch_stack	= x86_pmu_flush_branch_stack,
 };
 
-void arch_perf_update_userpage(struct perf_event_mmap_page *userpg, u64 now)
+void arch_perf_update_userpage(struct perf_event *event,
+			       struct perf_event_mmap_page *userpg, u64 now)
 {
 	struct cyc2ns_data *data;
 
 	userpg->cap_user_time = 0;
 	userpg->cap_user_time_zero = 0;
-	userpg->cap_user_rdpmc = x86_pmu.attr_rdpmc;
+	userpg->cap_user_rdpmc =
+		!!(event->hw.flags & PERF_X86_EVENT_RDPMC_ALLOWED);
 	userpg->pmc_width = x86_pmu.cntval_bits;
 
 	if (!sched_clock_stable())

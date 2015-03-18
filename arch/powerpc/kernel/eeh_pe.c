@@ -239,10 +239,18 @@ static void *__eeh_pe_get(void *data, void *flag)
 	if (pe->type & EEH_PE_PHB)
 		return NULL;
 
-	/* We prefer PE address */
-	if (edev->pe_config_addr &&
-	   (edev->pe_config_addr == pe->addr))
+	/*
+	 * We prefer PE address. For most cases, we should
+	 * have non-zero PE address
+	 */
+	if (eeh_has_flag(EEH_VALID_PE_ZERO)) {
+		if (edev->pe_config_addr == pe->addr)
+			return pe;
+	} else {
+		if (edev->pe_config_addr &&
+		    (edev->pe_config_addr == pe->addr))
 		return pe;
+	}
 
 	/* Try BDF address */
 	if (edev->config_addr &&
@@ -518,14 +526,13 @@ static void *__eeh_pe_state_mark(void *data, void *flag)
 	struct pci_dev *pdev;
 
 	/* Keep the state of permanently removed PE intact */
-	if ((pe->freeze_count > EEH_MAX_ALLOWED_FREEZES) &&
-	    (state & (EEH_PE_ISOLATED | EEH_PE_RECOVERING)))
+	if (pe->state & EEH_PE_REMOVED)
 		return NULL;
 
 	pe->state |= state;
 
 	/* Offline PCI devices if applicable */
-	if (state != EEH_PE_ISOLATED)
+	if (!(state & EEH_PE_ISOLATED))
 		return NULL;
 
 	eeh_pe_for_each_dev(pe, edev, tmp) {
@@ -533,6 +540,10 @@ static void *__eeh_pe_state_mark(void *data, void *flag)
 		if (pdev)
 			pdev->error_state = pci_channel_io_frozen;
 	}
+
+	/* Block PCI config access if required */
+	if (pe->state & EEH_PE_CFG_RESTRICTED)
+		pe->state |= EEH_PE_CFG_BLOCKED;
 
 	return NULL;
 }
@@ -588,8 +599,7 @@ static void *__eeh_pe_state_clear(void *data, void *flag)
 	struct pci_dev *pdev;
 
 	/* Keep the state of permanently removed PE intact */
-	if ((pe->freeze_count > EEH_MAX_ALLOWED_FREEZES) &&
-	    (state & EEH_PE_ISOLATED))
+	if (pe->state & EEH_PE_REMOVED)
 		return NULL;
 
 	pe->state &= ~state;
@@ -610,6 +620,10 @@ static void *__eeh_pe_state_clear(void *data, void *flag)
 
 		pdev->error_state = pci_channel_io_normal;
 	}
+
+	/* Unblock PCI config access if required */
+	if (pe->state & EEH_PE_CFG_RESTRICTED)
+		pe->state &= ~EEH_PE_CFG_BLOCKED;
 
 	return NULL;
 }

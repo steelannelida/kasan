@@ -19,7 +19,7 @@
 #include <asm/asmmacro-64.h>
 #endif
 
-#ifdef CONFIG_CPU_MIPSR2
+#if defined(CONFIG_CPU_MIPSR2) || defined(CONFIG_CPU_MIPSR6)
 	.macro	local_irq_enable reg=t0
 	ei
 	irq_enable_hazard
@@ -57,6 +57,8 @@
 #endif /* CONFIG_CPU_MIPSR2 */
 
 	.macro	fpu_save_16even thread tmp=t0
+	.set	push
+	SET_HARDFLOAT
 	cfc1	\tmp, fcr31
 	sdc1	$f0,  THREAD_FPR0_LS64(\thread)
 	sdc1	$f2,  THREAD_FPR2_LS64(\thread)
@@ -75,11 +77,13 @@
 	sdc1	$f28, THREAD_FPR28_LS64(\thread)
 	sdc1	$f30, THREAD_FPR30_LS64(\thread)
 	sw	\tmp, THREAD_FCR31(\thread)
+	.set	pop
 	.endm
 
 	.macro	fpu_save_16odd thread
 	.set	push
 	.set	mips64r2
+	SET_HARDFLOAT
 	sdc1	$f1,  THREAD_FPR1_LS64(\thread)
 	sdc1	$f3,  THREAD_FPR3_LS64(\thread)
 	sdc1	$f5,  THREAD_FPR5_LS64(\thread)
@@ -100,7 +104,8 @@
 	.endm
 
 	.macro	fpu_save_double thread status tmp
-#if defined(CONFIG_64BIT) || defined(CONFIG_CPU_MIPS32_R2)
+#if defined(CONFIG_64BIT) || defined(CONFIG_CPU_MIPS32_R2) || \
+		defined(CONFIG_CPU_MIPS32_R6)
 	sll	\tmp, \status, 5
 	bgez	\tmp, 10f
 	fpu_save_16odd \thread
@@ -110,6 +115,8 @@
 	.endm
 
 	.macro	fpu_restore_16even thread tmp=t0
+	.set	push
+	SET_HARDFLOAT
 	lw	\tmp, THREAD_FCR31(\thread)
 	ldc1	$f0,  THREAD_FPR0_LS64(\thread)
 	ldc1	$f2,  THREAD_FPR2_LS64(\thread)
@@ -133,6 +140,7 @@
 	.macro	fpu_restore_16odd thread
 	.set	push
 	.set	mips64r2
+	SET_HARDFLOAT
 	ldc1	$f1,  THREAD_FPR1_LS64(\thread)
 	ldc1	$f3,  THREAD_FPR3_LS64(\thread)
 	ldc1	$f5,  THREAD_FPR5_LS64(\thread)
@@ -153,7 +161,8 @@
 	.endm
 
 	.macro	fpu_restore_double thread status tmp
-#if defined(CONFIG_64BIT) || defined(CONFIG_CPU_MIPS32_R2)
+#if defined(CONFIG_64BIT) || defined(CONFIG_CPU_MIPS32_R2) || \
+		defined(CONFIG_CPU_MIPS32_R6)
 	sll	\tmp, \status, 5
 	bgez	\tmp, 10f				# 16 register mode?
 
@@ -163,16 +172,16 @@
 	fpu_restore_16even \thread \tmp
 	.endm
 
-#ifdef CONFIG_CPU_MIPSR2
+#if defined(CONFIG_CPU_MIPSR2) || defined(CONFIG_CPU_MIPSR6)
 	.macro	_EXT	rd, rs, p, s
 	ext	\rd, \rs, \p, \s
 	.endm
-#else /* !CONFIG_CPU_MIPSR2 */
+#else /* !CONFIG_CPU_MIPSR2 || !CONFIG_CPU_MIPSR6 */
 	.macro	_EXT	rd, rs, p, s
 	srl	\rd, \rs, \p
 	andi	\rd, \rd, (1 << \s) - 1
 	.endm
-#endif /* !CONFIG_CPU_MIPSR2 */
+#endif /* !CONFIG_CPU_MIPSR2 || !CONFIG_CPU_MIPSR6 */
 
 /*
  * Temporary until all gas have MT ASE support
@@ -277,6 +286,7 @@
 	.macro	cfcmsa	rd, cs
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	.insn
 	.word	CFC_MSA_INSN | (\cs << 11)
 	move	\rd, $1
@@ -286,6 +296,7 @@
 	.macro	ctcmsa	cd, rs
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	move	$1, \rs
 	.word	CTC_MSA_INSN | (\cd << 6)
 	.set	pop
@@ -294,7 +305,8 @@
 	.macro	ld_d	wd, off, base
 	.set	push
 	.set	noat
-	add	$1, \base, \off
+	SET_HARDFLOAT
+	addu	$1, \base, \off
 	.word	LDD_MSA_INSN | (\wd << 6)
 	.set	pop
 	.endm
@@ -302,7 +314,8 @@
 	.macro	st_d	wd, off, base
 	.set	push
 	.set	noat
-	add	$1, \base, \off
+	SET_HARDFLOAT
+	addu	$1, \base, \off
 	.word	STD_MSA_INSN | (\wd << 6)
 	.set	pop
 	.endm
@@ -310,6 +323,7 @@
 	.macro	copy_u_w	rd, ws, n
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	.insn
 	.word	COPY_UW_MSA_INSN | (\n << 16) | (\ws << 11)
 	/* move triggers an assembler bug... */
@@ -320,6 +334,7 @@
 	.macro	copy_u_d	rd, ws, n
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	.insn
 	.word	COPY_UD_MSA_INSN | (\n << 16) | (\ws << 11)
 	/* move triggers an assembler bug... */
@@ -330,6 +345,7 @@
 	.macro	insert_w	wd, n, rs
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	/* move triggers an assembler bug... */
 	or	$1, \rs, zero
 	.word	INSERT_W_MSA_INSN | (\n << 16) | (\wd << 6)
@@ -339,6 +355,7 @@
 	.macro	insert_d	wd, n, rs
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	/* move triggers an assembler bug... */
 	or	$1, \rs, zero
 	.word	INSERT_D_MSA_INSN | (\n << 16) | (\wd << 6)
@@ -381,6 +398,7 @@
 	st_d	31, THREAD_FPR31, \thread
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	cfcmsa	$1, MSA_CSR
 	sw	$1, THREAD_MSA_CSR(\thread)
 	.set	pop
@@ -389,6 +407,7 @@
 	.macro	msa_restore_all	thread
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	lw	$1, THREAD_MSA_CSR(\thread)
 	ctcmsa	MSA_CSR, $1
 	.set	pop
@@ -441,6 +460,7 @@
 	.macro	msa_init_all_upper
 	.set	push
 	.set	noat
+	SET_HARDFLOAT
 	not	$1, zero
 	msa_init_upper	0
 	.set	pop

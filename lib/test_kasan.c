@@ -28,13 +28,13 @@ static inline void fail(const char *message)
 
 static inline void assert_oob(void *ptr, const char *function)
 {
-	pr_info("##### ASSERT 'BUG: AddressSanitizer: out of bounds access in %s.*"
+	pr_info("##### ASSERT 'BUG: KASan: out of bounds access in %s.*"
 			"at addr %p'\n", function, ptr);
 }
 
 static inline void assert_uaf(void *ptr, const char *function)
 {
-	pr_info("##### ASSERT 'BUG: AddressSanitizer: use after free in %s.* at addr %p'\n",
+	pr_info("##### ASSERT 'BUG: KASan: use after free in %s.* at addr %p'\n",
 			function, ptr);
 }
 

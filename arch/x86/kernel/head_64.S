@@ -521,18 +521,11 @@ ENTRY(phys_base)
 	.endr
 
 NEXT_PAGE(kasan_zero_pte)
-	FILL(empty_zero_page - __START_KERNEL_map + __PAGE_KERNEL_RO, 512)
+	FILL(kasan_zero_page - __START_KERNEL_map + _KERNPG_TABLE, 512)
 NEXT_PAGE(kasan_zero_pmd)
-	FILL(kasan_zero_pte - __START_KERNEL_map + __PAGE_KERNEL_RO, 512)
+	FILL(kasan_zero_pte - __START_KERNEL_map + _KERNPG_TABLE, 512)
 NEXT_PAGE(kasan_zero_pud)
-	FILL(kasan_zero_pmd - __START_KERNEL_map + __PAGE_KERNEL_RO, 512)
-
-NEXT_PAGE(kasan_poisoned_pte)
-	FILL(kasan_poisoned_page - __START_KERNEL_map + _KERNPG_TABLE, 512)
-NEXT_PAGE(kasan_poisoned_pmd)
-	FILL(kasan_poisoned_pte - __START_KERNEL_map + _KERNPG_TABLE, 512)
-NEXT_PAGE(kasan_poisoned_pud)
-	FILL(kasan_poisoned_pmd - __START_KERNEL_map + _KERNPG_TABLE, 512)
+	FILL(kasan_zero_pmd - __START_KERNEL_map + _KERNPG_TABLE, 512)
 
 #undef FILL
 #endif
@@ -546,10 +539,13 @@ NEXT_PAGE(empty_zero_page)
 
 #ifdef CONFIG_KASAN
 /*
- * This page used as early shadow.
- * Latter we use it to poison large ranges of memory that
- * shouldn't be accessed by anyone except kasan itself.
+ * This page used as early shadow. We don't use empty_zero_page
+ * at early stages, stack instrumentation could write some garbage
+ * to this page.
+ * Latter we reuse it as zero shadow for large ranges of memory
+ * that allowed to access, but not instrumented by kasan
+ * (vmalloc/vmemmap ...).
  */
-NEXT_PAGE(kasan_poisoned_page)
+NEXT_PAGE(kasan_zero_page)
 	.skip PAGE_SIZE
 #endif

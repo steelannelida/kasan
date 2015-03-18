@@ -2,52 +2,66 @@
 #define __MM_KASAN_KASAN_H
 
 #include <linux/kasan.h>
-#include <linux/compiler.h>
-
-/*
- * Prevent randconfig/allconfig build
- * errors on old compilers
- */
-#ifndef ASAN_ABI_VERSION
-#define ASAN_ABI_VERSION 1
-#endif
 
 #define KASAN_SHADOW_SCALE_SIZE (1UL << KASAN_SHADOW_SCALE_SHIFT)
 #define KASAN_SHADOW_MASK       (KASAN_SHADOW_SCALE_SIZE - 1)
 
-struct access_info {
-	unsigned long access_addr;
-	unsigned long first_bad_addr;
+#define KASAN_FREE_PAGE         0xFF  /* page was freed */
+#define KASAN_FREE_PAGE         0xFF  /* page was freed */
+#define KASAN_PAGE_REDZONE      0xFE  /* redzone for kmalloc_large allocations */
+#define KASAN_KMALLOC_REDZONE   0xFC  /* redzone inside slub object */
+#define KASAN_KMALLOC_FREE      0xFB  /* object was freed (kmem_cache_free/kfree) */
+#define KASAN_GLOBAL_REDZONE    0xFA  /* redzone for global variable */
+
+/*
+ * Stack redzone shadow values
+ * (Those are compiler's ABI, don't change them)
+ */
+#define KASAN_STACK_LEFT        0xF1
+#define KASAN_STACK_MID         0xF2
+#define KASAN_STACK_RIGHT       0xF3
+#define KASAN_STACK_PARTIAL     0xF4
+
+/* Don't break randconfig/all*config builds */
+#ifndef KASAN_ABI_VERSION
+#define KASAN_ABI_VERSION 1
+#endif
+
+struct kasan_access_info {
+	const void *access_addr;
+	const void *first_bad_addr;
 	size_t access_size;
 	bool is_write;
 	unsigned long ip;
 };
 
+/* The layout of struct dictated by compiler */
 struct kasan_source_location {
 	const char *filename;
 	int line_no;
 	int column_no;
 };
 
+/* The layout of struct dictated by compiler */
 struct kasan_global {
 	const void *beg;		/* Address of the beginning of the global variable. */
-	size_t size;			/* Initial size of the global variable. */
-	size_t size_with_redzone; 	/* Size of the variable + size of the red zone. 32 bytes aligned */
+	size_t size;			/* Size of the global variable. */
+	size_t size_with_redzone;	/* Size of the variable + size of the red zone. 32 bytes aligned */
 	const void *name;
 	const void *module_name;	/* Name of the module where the global variable is declared. */
-	unsigned long has_dynamic_init;	/* this needed only for C++ */
-
-#if ASAN_ABI_VERSION >= 4
-	struct asan_source_location *location;
+	unsigned long has_dynamic_init;	/* This needed for C++ */
+#if KASAN_ABI_VERSION >= 4
+	struct kasan_source_location *location;
 #endif
 };
 
-void kasan_report_error(struct access_info *info);
-void kasan_report_user_access(struct access_info *info);
+void kasan_report_error(struct kasan_access_info *info);
+void kasan_report_user_access(struct kasan_access_info *info);
 
-static inline unsigned long kasan_shadow_to_mem(unsigned long shadow_addr)
+static inline const void *kasan_shadow_to_mem(const void *shadow_addr)
 {
-	return (shadow_addr - KASAN_SHADOW_OFFSET) << KASAN_SHADOW_SCALE_SHIFT;
+	return (void *)(((unsigned long)shadow_addr - KASAN_SHADOW_OFFSET)
+		<< KASAN_SHADOW_SCALE_SHIFT);
 }
 
 static inline bool kasan_enabled(void)
@@ -55,21 +69,7 @@ static inline bool kasan_enabled(void)
 	return !current->kasan_depth;
 }
 
-static __always_inline void kasan_report(unsigned long addr,
-					size_t size,
-					bool is_write)
-{
-	struct access_info info;
-
-	if (likely(!kasan_enabled()))
-		return;
-
-	info.access_addr = addr;
-	info.access_size = size;
-	info.is_write = is_write;
-	info.ip = _RET_IP_;
-	kasan_report_error(&info);
-}
-
+void kasan_report(unsigned long addr, size_t size,
+		bool is_write, unsigned long ip);
 
 #endif

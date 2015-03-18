@@ -395,8 +395,6 @@ int inet_release(struct socket *sock)
 	if (sk) {
 		long timeout;
 
-		sock_rps_reset_flow(sk);
-
 		/* Applications forget to leave groups before exiting */
 		ip_mc_drop_socket(sk);
 
@@ -1222,7 +1220,7 @@ static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 		       SKB_GSO_TCPV6 |
 		       SKB_GSO_UDP_TUNNEL |
 		       SKB_GSO_UDP_TUNNEL_CSUM |
-		       SKB_GSO_MPLS |
+		       SKB_GSO_TUNNEL_REMCSUM |
 		       0)))
 		goto out;
 
@@ -1246,7 +1244,7 @@ static struct sk_buff *inet_gso_segment(struct sk_buff *skb,
 
 	encap = SKB_GSO_CB(skb)->encap_level > 0;
 	if (encap)
-		features = skb->dev->hw_enc_features & netif_skb_features(skb);
+		features &= skb->dev->hw_enc_features;
 	SKB_GSO_CB(skb)->encap_level += ihl;
 
 	skb_reset_transport_header(skb);
@@ -1384,6 +1382,17 @@ out:
 	NAPI_GRO_CB(skb)->flush |= flush;
 
 	return pp;
+}
+
+int inet_recv_error(struct sock *sk, struct msghdr *msg, int len, int *addr_len)
+{
+	if (sk->sk_family == AF_INET)
+		return ip_recv_error(sk, msg, len, addr_len);
+#if IS_ENABLED(CONFIG_IPV6)
+	if (sk->sk_family == AF_INET6)
+		return pingv6_ops.ipv6_recv_error(sk, msg, len, addr_len);
+#endif
+	return -EINVAL;
 }
 
 static int inet_gro_complete(struct sk_buff *skb, int nhoff)
