@@ -1114,9 +1114,9 @@ static bool update_checksum(struct kmemleak_object *object)
 	if (!kmemcheck_is_obj_initialized(object->pointer, object->size))
 		return false;
 
-	kasan_disable_local();
+	kasan_disable_current();
 	object->checksum = crc32(0, (void *)object->pointer, object->size);
-	kasan_enable_local();
+	kasan_enable_current();
 
 	return object->checksum != old_csum;
 }
@@ -1168,9 +1168,9 @@ static void scan_block(void *_start, void *_end,
 						  BYTES_PER_POINTER))
 			continue;
 
-		kasan_disable_local();
+		kasan_disable_current();
 		pointer = *ptr;
-		kasan_enable_local();
+		kasan_enable_current();
 
 		object = find_and_get_object(pointer, 1);
 		if (!object)

@@ -37,7 +37,9 @@ const char *pm_states[PM_SUSPEND_MAX];
 static const struct platform_suspend_ops *suspend_ops;
 static const struct platform_freeze_ops *freeze_ops;
 static DECLARE_WAIT_QUEUE_HEAD(suspend_freeze_wait_head);
-static bool suspend_freeze_wake;
+
+enum freeze_state __read_mostly suspend_freeze_state;
+static DEFINE_SPINLOCK(suspend_freeze_lock);
 
 void freeze_set_ops(const struct platform_freeze_ops *ops)
 {
@@ -48,22 +50,49 @@ void freeze_set_ops(const struct platform_freeze_ops *ops)
 
 static void freeze_begin(void)
 {
-	suspend_freeze_wake = false;
+	suspend_freeze_state = FREEZE_STATE_NONE;
 }
 
 static void freeze_enter(void)
 {
-	cpuidle_use_deepest_state(true);
+	spin_lock_irq(&suspend_freeze_lock);
+	if (pm_wakeup_pending())
+		goto out;
+
+	suspend_freeze_state = FREEZE_STATE_ENTER;
+	spin_unlock_irq(&suspend_freeze_lock);
+
+	get_online_cpus();
 	cpuidle_resume();
-	wait_event(suspend_freeze_wait_head, suspend_freeze_wake);
+
+	/* Push all the CPUs into the idle loop. */
+	wake_up_all_idle_cpus();
+	pr_debug("PM: suspend-to-idle\n");
+	/* Make the current CPU wait so it can enter the idle loop too. */
+	wait_event(suspend_freeze_wait_head,
+		   suspend_freeze_state == FREEZE_STATE_WAKE);
+	pr_debug("PM: resume from suspend-to-idle\n");
+
 	cpuidle_pause();
-	cpuidle_use_deepest_state(false);
+	put_online_cpus();
+
+	spin_lock_irq(&suspend_freeze_lock);
+
+ out:
+	suspend_freeze_state = FREEZE_STATE_NONE;
+	spin_unlock_irq(&suspend_freeze_lock);
 }
 
 void freeze_wake(void)
 {
-	suspend_freeze_wake = true;
-	wake_up(&suspend_freeze_wait_head);
+	unsigned long flags;
+
+	spin_lock_irqsave(&suspend_freeze_lock, flags);
+	if (suspend_freeze_state > FREEZE_STATE_NONE) {
+		suspend_freeze_state = FREEZE_STATE_WAKE;
+		wake_up(&suspend_freeze_wait_head);
+	}
+	spin_unlock_irqrestore(&suspend_freeze_lock, flags);
 }
 EXPORT_SYMBOL_GPL(freeze_wake);
 
@@ -146,7 +175,7 @@ static int platform_suspend_prepare(suspend_state_t state)
 
 static int platform_suspend_prepare_late(suspend_state_t state)
 {
-	return state == PM_SUSPEND_FREEZE && freeze_ops->prepare ?
+	return state == PM_SUSPEND_FREEZE && freeze_ops && freeze_ops->prepare ?
 		freeze_ops->prepare() : 0;
 }
 
@@ -164,7 +193,7 @@ static void platform_resume_noirq(suspend_state_t state)
 
 static void platform_resume_early(suspend_state_t state)
 {
-	if (state == PM_SUSPEND_FREEZE && freeze_ops->restore)
+	if (state == PM_SUSPEND_FREEZE && freeze_ops && freeze_ops->restore)
 		freeze_ops->restore();
 }
 

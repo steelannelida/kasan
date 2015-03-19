@@ -273,18 +273,38 @@ static void aio_free_ring(struct kioctx *ctx)
 
 static int aio_ring_mmap(struct file *file, struct vm_area_struct *vma)
 {
+	vma->vm_flags |= VM_DONTEXPAND;
 	vma->vm_ops = &generic_file_vm_ops;
 	return 0;
 }
 
+static void aio_ring_remap(struct file *file, struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct kioctx_table *table;
+	int i;
+
+	spin_lock(&mm->ioctx_lock);
+	rcu_read_lock();
+	table = rcu_dereference(mm->ioctx_table);
+	for (i = 0; i < table->nr; i++) {
+		struct kioctx *ctx;
+
+		ctx = table->table[i];
+		if (ctx && ctx->aio_ring_file == file) {
+			ctx->user_id = ctx->mmap_base = vma->vm_start;
+			break;
+		}
+	}
+
+	rcu_read_unlock();
+	spin_unlock(&mm->ioctx_lock);
+}
+
 static const struct file_operations aio_ring_fops = {
 	.mmap = aio_ring_mmap,
+	.mremap = aio_ring_remap,
 };
-
-static int aio_set_page_dirty(struct page *page)
-{
-	return 0;
-}
 
 #if IS_ENABLED(CONFIG_MIGRATION)
 static int aio_migratepage(struct address_space *mapping, struct page *new,
@@ -357,7 +377,7 @@ out:
 #endif
 
 static const struct address_space_operations aio_ctx_aops = {
-	.set_page_dirty = aio_set_page_dirty,
+	.set_page_dirty = __set_page_dirty_no_writeback,
 #if IS_ENABLED(CONFIG_MIGRATION)
 	.migratepage	= aio_migratepage,
 #endif
@@ -412,7 +432,6 @@ static int aio_setup_ring(struct kioctx *ctx)
 		pr_debug("pid(%d) page[%d]->count=%d\n",
 			 current->pid, i, page_count(page));
 		SetPageUptodate(page);
-		SetPageDirty(page);
 		unlock_page(page);
 
 		ctx->ring_pages[i] = page;
@@ -1108,6 +1127,13 @@ static long aio_read_events_ring(struct kioctx *ctx,
 	long ret = 0;
 	int copy_ret;
 
+	/*
+	 * The mutex can block and wake us up and that will cause
+	 * wait_event_interruptible_hrtimeout() to schedule without sleeping
+	 * and repeat. This should be rare enough that it doesn't cause
+	 * peformance issues. See the comment in read_events() for more detail.
+	 */
+	sched_annotate_sleep();
 	mutex_lock(&ctx->ring_lock);
 
 	/* Access to ->ring_pages here is protected by ctx->ring_lock. */
@@ -1221,8 +1247,12 @@ static long read_events(struct kioctx *ctx, long min_nr, long nr,
 	 * the ringbuffer empty. So in practice we should be ok, but it's
 	 * something to be aware of when touching this code.
 	 */
-	wait_event_interruptible_hrtimeout(ctx->wait,
-			aio_read_events(ctx, min_nr, nr, event, &ret), until);
+	if (until.tv64 == 0)
+		aio_read_events(ctx, min_nr, nr, event, &ret);
+	else
+		wait_event_interruptible_hrtimeout(ctx->wait,
+				aio_read_events(ctx, min_nr, nr, event, &ret),
+				until);
 
 	if (!ret && signal_pending(current))
 		ret = -EINTR;
@@ -1255,7 +1285,7 @@ SYSCALL_DEFINE2(io_setup, unsigned, nr_events, aio_context_t __user *, ctxp)
 
 	ret = -EINVAL;
 	if (unlikely(ctx || nr_events == 0)) {
-		pr_debug("EINVAL: io_setup: ctx %lu nr_events %u\n",
+		pr_debug("EINVAL: ctx %lu nr_events %u\n",
 		         ctx, nr_events);
 		goto out;
 	}
@@ -1303,7 +1333,7 @@ SYSCALL_DEFINE1(io_destroy, aio_context_t, ctx)
 
 		return ret;
 	}
-	pr_debug("EINVAL: io_destroy: invalid context id\n");
+	pr_debug("EINVAL: invalid context id\n");
 	return -EINVAL;
 }
 
@@ -1485,7 +1515,7 @@ static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 	    (iocb->aio_nbytes != (size_t)iocb->aio_nbytes) ||
 	    ((ssize_t)iocb->aio_nbytes < 0)
 	   )) {
-		pr_debug("EINVAL: io_submit: overflow check\n");
+		pr_debug("EINVAL: overflow check\n");
 		return -EINVAL;
 	}
 

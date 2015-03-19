@@ -70,7 +70,7 @@ struct kmem_cache {
 	int obj_offset;
 #endif /* CONFIG_DEBUG_SLAB */
 #ifdef CONFIG_MEMCG_KMEM
-	struct memcg_cache_params *memcg_params;
+	struct memcg_cache_params memcg_params;
 #endif
 #ifdef CONFIG_KASAN
 	struct kasan_cache kasan_info;

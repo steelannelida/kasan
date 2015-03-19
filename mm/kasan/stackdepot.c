@@ -12,7 +12,7 @@
 
 
 #include <linux/gfp.h>
-#include <linux/hash.h>
+#include <linux/jhash.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/percpu.h>
@@ -117,7 +117,7 @@ static struct kasan_stack *stack_table[STACK_HASH_SIZE] = {
 /* Calculate hash for a stack */
 static inline u32 hash_stack(unsigned long *entries, int size)
 {
-	return arch_fast_hash2((u32 *)entries,
+	return jhash2((u32 *)entries,
 			       size * sizeof(unsigned long) / sizeof(u32),
 			       STACK_HASH_SEED);
 }

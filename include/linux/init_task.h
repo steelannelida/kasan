@@ -102,7 +102,7 @@ extern struct group_info init_groups;
 #define INIT_IDS
 #endif
 
-#ifdef CONFIG_TREE_PREEMPT_RCU
+#ifdef CONFIG_PREEMPT_RCU
 #define INIT_TASK_RCU_TREE_PREEMPT()					\
 	.rcu_blocked_node = NULL,
 #else
@@ -191,6 +191,9 @@ extern struct task_group root_task_group;
 	.nr_cpus_allowed= NR_CPUS,					\
 	.mm		= NULL,						\
 	.active_mm	= &init_mm,					\
+	.restart_block = {						\
+		.fn = do_no_restart_syscall,				\
+	},								\
 	.se		= {						\
 		.group_node 	= LIST_HEAD_INIT(tsk.se.group_node),	\
 	},								\

@@ -104,6 +104,13 @@
 int eeh_subsystem_flags;
 EXPORT_SYMBOL(eeh_subsystem_flags);
 
+/*
+ * EEH allowed maximal frozen times. If one particular PE's
+ * frozen count in last hour exceeds this limit, the PE will
+ * be forced to be offline permanently.
+ */
+int eeh_max_freezes = 5;
+
 /* Platform dependent EEH operations */
 struct eeh_ops *eeh_ops = NULL;
 
@@ -143,6 +150,8 @@ static int __init eeh_setup(char *str)
 {
 	if (!strcmp(str, "off"))
 		eeh_add_flag(EEH_FORCE_DISABLED);
+	else if (!strcmp(str, "early_log"))
+		eeh_add_flag(EEH_EARLY_DUMP_LOG);
 
 	return 1;
 }
@@ -256,6 +265,13 @@ static void *eeh_dump_pe_log(void *data, void *flag)
 	struct eeh_pe *pe = data;
 	struct eeh_dev *edev, *tmp;
 	size_t *plen = flag;
+
+	/* If the PE's config space is blocked, 0xFF's will be
+	 * returned. It's pointless to collect the log in this
+	 * case.
+	 */
+	if (pe->state & EEH_PE_CFG_BLOCKED)
+		return NULL;
 
 	eeh_pe_for_each_dev(pe, edev, tmp)
 		*plen += eeh_dump_dev_log(edev, pci_regs_buf + *plen,
@@ -673,18 +689,18 @@ int pcibios_set_pcie_reset_state(struct pci_dev *dev, enum pcie_reset_state stat
 	switch (state) {
 	case pcie_deassert_reset:
 		eeh_ops->reset(pe, EEH_RESET_DEACTIVATE);
-		eeh_pe_state_clear(pe, EEH_PE_RESET);
+		eeh_pe_state_clear(pe, EEH_PE_CFG_BLOCKED);
 		break;
 	case pcie_hot_reset:
-		eeh_pe_state_mark(pe, EEH_PE_RESET);
+		eeh_pe_state_mark(pe, EEH_PE_CFG_BLOCKED);
 		eeh_ops->reset(pe, EEH_RESET_HOT);
 		break;
 	case pcie_warm_reset:
-		eeh_pe_state_mark(pe, EEH_PE_RESET);
+		eeh_pe_state_mark(pe, EEH_PE_CFG_BLOCKED);
 		eeh_ops->reset(pe, EEH_RESET_FUNDAMENTAL);
 		break;
 	default:
-		eeh_pe_state_clear(pe, EEH_PE_RESET);
+		eeh_pe_state_clear(pe, EEH_PE_CFG_BLOCKED);
 		return -EINVAL;
 	};
 
@@ -751,30 +767,41 @@ static void eeh_reset_pe_once(struct eeh_pe *pe)
 int eeh_reset_pe(struct eeh_pe *pe)
 {
 	int flags = (EEH_STATE_MMIO_ACTIVE | EEH_STATE_DMA_ACTIVE);
-	int i, rc;
+	int i, state, ret;
+
+	/* Mark as reset and block config space */
+	eeh_pe_state_mark(pe, EEH_PE_RESET | EEH_PE_CFG_BLOCKED);
 
 	/* Take three shots at resetting the bus */
-	for (i=0; i<3; i++) {
+	for (i = 0; i < 3; i++) {
 		eeh_reset_pe_once(pe);
 
 		/*
 		 * EEH_PE_ISOLATED is expected to be removed after
 		 * BAR restore.
 		 */
-		rc = eeh_ops->wait_state(pe, PCI_BUS_RESET_WAIT_MSEC);
-		if ((rc & flags) == flags)
-			return 0;
-
-		if (rc < 0) {
-			pr_err("%s: Unrecoverable slot failure on PHB#%d-PE#%x",
-				__func__, pe->phb->global_number, pe->addr);
-			return -1;
+		state = eeh_ops->wait_state(pe, PCI_BUS_RESET_WAIT_MSEC);
+		if ((state & flags) == flags) {
+			ret = 0;
+			goto out;
 		}
-		pr_err("EEH: bus reset %d failed on PHB#%d-PE#%x, rc=%d\n",
-			i+1, pe->phb->global_number, pe->addr, rc);
+
+		if (state < 0) {
+			pr_warn("%s: Unrecoverable slot failure on PHB#%d-PE#%x",
+				__func__, pe->phb->global_number, pe->addr);
+			ret = -ENOTRECOVERABLE;
+			goto out;
+		}
+
+		/* We might run out of credits */
+		ret = -EIO;
+		pr_warn("%s: Failure %d resetting PHB#%x-PE#%x\n (%d)\n",
+			__func__, state, pe->phb->global_number, pe->addr, (i + 1));
 	}
 
-	return -1;
+out:
+	eeh_pe_state_clear(pe, EEH_PE_RESET | EEH_PE_CFG_BLOCKED);
+	return ret;
 }
 
 /**
@@ -913,11 +940,8 @@ int eeh_init(void)
 		pr_warn("%s: Platform EEH operation not found\n",
 			__func__);
 		return -EEXIST;
-	} else if ((ret = eeh_ops->init())) {
-		pr_warn("%s: Failed to call platform init function (%d)\n",
-			__func__, ret);
+	} else if ((ret = eeh_ops->init()))
 		return ret;
-	}
 
 	/* Initialize EEH event */
 	ret = eeh_event_init();
@@ -1202,6 +1226,7 @@ int eeh_unfreeze_pe(struct eeh_pe *pe, bool sw_state)
 static struct pci_device_id eeh_reset_ids[] = {
 	{ PCI_DEVICE(0x19a2, 0x0710) },	/* Emulex, BE     */
 	{ PCI_DEVICE(0x10df, 0xe220) },	/* Emulex, Lancer */
+	{ PCI_DEVICE(0x14e4, 0x1657) }, /* Broadcom BCM5719 */
 	{ 0 }
 };
 
@@ -1523,7 +1548,7 @@ int eeh_pe_reset(struct eeh_pe *pe, int option)
 	switch (option) {
 	case EEH_RESET_DEACTIVATE:
 		ret = eeh_ops->reset(pe, option);
-		eeh_pe_state_clear(pe, EEH_PE_RESET);
+		eeh_pe_state_clear(pe, EEH_PE_CFG_BLOCKED);
 		if (ret)
 			break;
 
@@ -1538,7 +1563,7 @@ int eeh_pe_reset(struct eeh_pe *pe, int option)
 		 */
 		eeh_ops->set_option(pe, EEH_OPT_FREEZE_PE);
 
-		eeh_pe_state_mark(pe, EEH_PE_RESET);
+		eeh_pe_state_mark(pe, EEH_PE_CFG_BLOCKED);
 		ret = eeh_ops->reset(pe, option);
 		break;
 	default:
@@ -1634,8 +1659,22 @@ static int eeh_enable_dbgfs_get(void *data, u64 *val)
 	return 0;
 }
 
+static int eeh_freeze_dbgfs_set(void *data, u64 val)
+{
+	eeh_max_freezes = val;
+	return 0;
+}
+
+static int eeh_freeze_dbgfs_get(void *data, u64 *val)
+{
+	*val = eeh_max_freezes;
+	return 0;
+}
+
 DEFINE_SIMPLE_ATTRIBUTE(eeh_enable_dbgfs_ops, eeh_enable_dbgfs_get,
 			eeh_enable_dbgfs_set, "0x%llx\n");
+DEFINE_SIMPLE_ATTRIBUTE(eeh_freeze_dbgfs_ops, eeh_freeze_dbgfs_get,
+			eeh_freeze_dbgfs_set, "0x%llx\n");
 #endif
 
 static int __init eeh_init_proc(void)
@@ -1646,6 +1685,9 @@ static int __init eeh_init_proc(void)
 		debugfs_create_file("eeh_enable", 0600,
                                     powerpc_debugfs_root, NULL,
                                     &eeh_enable_dbgfs_ops);
+		debugfs_create_file("eeh_max_freezes", 0600,
+				    powerpc_debugfs_root, NULL,
+				    &eeh_freeze_dbgfs_ops);
 #endif
 	}
 
