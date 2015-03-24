@@ -259,7 +259,9 @@ static int __init kmalloc_tests_init(void)
 	kmalloc_oob_right();
 	kmalloc_oob_left();
 	kmalloc_node_oob_right();
+#ifdef CONFIG_SLUB
 	kmalloc_large_oob_rigth();
+#endif
 	kmalloc_oob_krealloc_more();
 	kmalloc_oob_krealloc_less();
 	kmalloc_oob_16();
